@@ -15,7 +15,13 @@ async function getPlayableVideoUrl(url: string) {
   try {
     // Attempt to use ytdl-core first for Vercel compatibility
     const info = await ytdl.getInfo(url);
-    const format = ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+    
+    // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
+    // So we use a custom filter to ensure we get a combined mp4 stream if possible.
+    const format = ytdl.chooseFormat(info.formats, { 
+      filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio 
+    }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+    
     if (format && format.url) {
       return format.url;
     }
