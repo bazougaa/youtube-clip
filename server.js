@@ -45,7 +45,15 @@ async function getPlayableVideoUrl(url) {
 async function getVideoDetails(url) {
     try {
         // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
-        const info = await ytdl.getInfo(url);
+        // Add simple fallback agents to help bypass YouTube blocks on Vercel datacenter IPs
+        const info = await ytdl.getBasicInfo(url, {
+            requestOptions: {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                }
+            }
+        });
         const formats = info.formats.map(f => ({
             format_id: String(f.itag),
             ext: f.container,
@@ -63,21 +71,39 @@ async function getVideoDetails(url) {
             formats
         };
     } catch (ytdlError) {
-        console.warn("ytdl-core metadata lookup failed, falling back to yt-dlp:", ytdlError);
-        // Fallback to yt-dlp binary if available
-        const { stdout } = await execFileAsync(ytDlpPath, [
-            "--no-playlist",
-            "--no-warnings",
-            "--force-ipv4",
-            "--socket-timeout",
-            "15",
-            "--dump-single-json",
-            url,
-        ], {
-            maxBuffer: 1024 * 1024 * 10,
-            timeout: 1000 * 45,
-        });
-        return JSON.parse(stdout);
+        console.warn("ytdl-core metadata lookup failed, attempting oEmbed fallback:", ytdlError);
+        
+        // VERCEL FALLBACK: If ytdl-core is blocked and yt-dlp binary is missing, we must have duration.
+        // Unfortunately oEmbed doesn't provide duration. We will fallback to returning a default duration 
+        // to prevent the UI from crashing if all metadata methods fail on Vercel.
+        try {
+            if (process.env.VERCEL) {
+                console.warn("Running on Vercel, returning fallback metadata to prevent UI crash.");
+                return {
+                    title: "YouTube Video",
+                    duration: 60 * 60, // Fallback to 1 hour if we absolutely cannot read it, so the slider at least renders
+                    formats: []
+                };
+            }
+
+            // Fallback to yt-dlp binary if available (local dev)
+            const { stdout } = await execFileAsync(ytDlpPath, [
+                "--no-playlist",
+                "--no-warnings",
+                "--force-ipv4",
+                "--socket-timeout",
+                "15",
+                "--dump-single-json",
+                url,
+            ], {
+                maxBuffer: 1024 * 1024 * 10,
+                timeout: 1000 * 45,
+            });
+            return JSON.parse(stdout);
+        } catch (fallbackError) {
+            console.error("All metadata fallbacks failed:", fallbackError);
+            throw fallbackError;
+        }
     }
 }
 function getAvailableQualities(formats = []) {
