@@ -10,6 +10,17 @@ import ffmpegStatic from "ffmpeg-static";
 const execFileAsync = promisify(execFile);
 const ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
 async function getPlayableVideoUrl(url) {
+    try {
+        // Attempt to use ytdl-core first for Vercel compatibility
+        const info = await ytdl.getInfo(url);
+        const format = ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+        if (format && format.url) {
+            return format.url;
+        }
+    } catch (ytdlError) {
+        console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
+    }
+    // Fallback to yt-dlp binary if available
     const { stdout } = await execFileAsync(ytDlpPath, [
         "--no-playlist",
         "--no-warnings",
