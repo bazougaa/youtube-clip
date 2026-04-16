@@ -26,19 +26,42 @@ async function getPlayableVideoUrl(url) {
     return streamUrl;
 }
 async function getVideoDetails(url) {
-    const { stdout } = await execFileAsync(ytDlpPath, [
-        "--no-playlist",
-        "--no-warnings",
-        "--force-ipv4",
-        "--socket-timeout",
-        "15",
-        "--dump-single-json",
-        url,
-    ], {
-        maxBuffer: 1024 * 1024 * 10,
-        timeout: 1000 * 45,
-    });
-    return JSON.parse(stdout);
+    try {
+        // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
+        const info = await ytdl.getInfo(url);
+        const formats = info.formats.map(f => ({
+            format_id: String(f.itag),
+            ext: f.container,
+            height: f.height,
+            width: f.width,
+            fps: f.fps,
+            vcodec: f.hasVideo ? f.videoCodec : "none",
+            acodec: f.hasAudio ? f.audioCodec : "none",
+            filesize: Number(f.contentLength) || undefined,
+        }));
+        
+        return {
+            title: info.videoDetails.title,
+            duration: Number(info.videoDetails.lengthSeconds),
+            formats
+        };
+    } catch (ytdlError) {
+        console.warn("ytdl-core metadata lookup failed, falling back to yt-dlp:", ytdlError);
+        // Fallback to yt-dlp binary if available
+        const { stdout } = await execFileAsync(ytDlpPath, [
+            "--no-playlist",
+            "--no-warnings",
+            "--force-ipv4",
+            "--socket-timeout",
+            "15",
+            "--dump-single-json",
+            url,
+        ], {
+            maxBuffer: 1024 * 1024 * 10,
+            timeout: 1000 * 45,
+        });
+        return JSON.parse(stdout);
+    }
 }
 function getAvailableQualities(formats = []) {
     const qualitiesByHeight = new Map();
