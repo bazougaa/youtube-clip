@@ -6,14 +6,9 @@ import os from "os";
 import path from "path";
 import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
-import ffmpeg from "fluent-ffmpeg";
 import ffmpegStatic from "ffmpeg-static";
 const execFileAsync = promisify(execFile);
 const ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
-// Set ffmpeg path
-if (ffmpegStatic) {
-    ffmpeg.setFfmpegPath(ffmpegStatic);
-}
 async function getPlayableVideoUrl(url) {
     const { stdout } = await execFileAsync(ytDlpPath, [
         "--no-playlist",
