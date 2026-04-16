@@ -201,22 +201,34 @@ export default function App() {
 
     setIsLoadingInfo(true);
     fetch(`/api/video-info?url=${encodeURIComponent(videoUrl)}`)
-      .then((response) => {
-        if (!response.ok) throw new Error("Failed to read video info");
-        return response.json() as Promise<{ duration?: number; qualities?: VideoQuality[] }>;
+      .then(async (response) => {
+        let payload: { duration?: number; qualities?: VideoQuality[]; warning?: string; error?: string } = {};
+        try {
+          payload = (await response.json()) as typeof payload;
+        } catch {
+          // ignore JSON parse failures and fall back to status text
+        }
+        if (!response.ok) {
+          throw new Error(payload.error || `Failed to read video info (${response.status})`);
+        }
+        return payload;
       })
       .then((info) => {
         if (isDisposed || infoRequestIdRef.current !== requestId) return;
-        const nextDuration = Number(info.duration) || 0;
+        const nextDuration = Math.max(0, Number(info.duration) || 0);
         setDuration(nextDuration);
         setVideoQualities(info.qualities || []);
         const nextEnd = Math.min(10, nextDuration || 10);
         setEndTime(nextEnd);
         setPreviewRange({ start: 0, end: nextEnd });
+        if (info.warning) {
+          setError(info.warning);
+        }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (isDisposed || infoRequestIdRef.current !== requestId) return;
-        setError("Loaded the preview, but could not read the video duration.");
+        const message = err instanceof Error ? err.message : "Loaded the preview, but could not read the video duration.";
+        setError(message);
       })
       .finally(() => {
         // ALWAYS clear loading state, even if disposed or superseded, 

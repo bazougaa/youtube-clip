@@ -389,31 +389,7 @@ async function startServer() {
   });
 
   app.get("/api/frame", async (req, res) => {
-    const { url, time } = req.query;
-    if (!url || typeof url !== 'string') return res.status(400).send("URL required");
-    const timestamp = parseFloat(time as string) || 0;
-
-    try {
-      const videoStream = ytdl(url, { 
-        quality: 'highestvideo',
-        filter: 'videoonly'
-      });
-      
-      res.setHeader('Content-Type', 'image/jpeg');
-      
-      ffmpeg(videoStream)
-        .seekInput(timestamp)
-        .frames(1)
-        .format('image2')
-        .on('error', (err) => {
-          console.error('Frame extraction error:', err);
-          if (!res.headersSent) res.status(500).send("Error");
-        })
-        .pipe(res, { end: true });
-    } catch (error) {
-      console.error('Frame extraction error:', error);
-      res.status(500).send("Error");
-    }
+    res.status(501).json({ error: "Frame extraction is currently unavailable." });
   });
 
   app.get("/api/video-info", async (req, res) => {
@@ -427,7 +403,13 @@ async function startServer() {
       res.json(info);
     } catch (error) {
       console.error('Error reading video info:', error);
-      res.status(500).json({ error: "Failed to read video info." });
+      // Fail soft: keep the app usable even when metadata providers are blocked.
+      res.status(200).json({
+        title: "YouTube video",
+        duration: 600,
+        qualities: [],
+        warning: "Could not read exact duration, using a fallback so preview can continue.",
+      });
     }
   });
 
