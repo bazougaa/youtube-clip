@@ -1,0 +1,5 @@
+{
+  "name": "YouTube Clipper",
+  "description": "Preview YouTube videos and download trimmed clips.",
+  "requestFramePermissions": []
+}
