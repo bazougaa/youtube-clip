@@ -380,20 +380,56 @@ export default function App() {
     setError(null);
     
     try {
-      // Let the browser handle a streamed file download instead of buffering in memory.
       const params = new URLSearchParams({
         url: videoUrl,
         start: String(startTime),
         end: String(endTime),
       });
+      
+      // First, fetch the endpoint to check if it throws an error before triggering a download
+      const response = await fetch(`/api/trim?${params.toString()}`);
+      if (!response.ok) {
+        let errorMessage = "Failed to download clip.";
+        try {
+          const errorData = await response.json();
+          if (errorData.error) {
+            errorMessage = errorData.error;
+          }
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(errorMessage);
+      }
+
+      // If it's OK, we can trigger the actual browser download prompt.
+      // Since we already fetched the response, we can create a blob URL to save it.
+      const blob = await response.blob();
+      
+      // Extract filename from the Content-Disposition header if present
+      let filename = "clip.mp4";
+      const disposition = response.headers.get('Content-Disposition');
+      if (disposition && disposition.indexOf('attachment') !== -1) {
+        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+        const matches = filenameRegex.exec(disposition);
+        if (matches != null && matches[1]) { 
+          filename = matches[1].replace(/['"]/g, '');
+        }
+      }
+
+      const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = `/api/trim?${params.toString()}`;
+      a.href = blobUrl;
+      a.download = filename;
       a.rel = "noopener";
       document.body.appendChild(a);
       a.click();
       a.remove();
-    } catch {
-      setError("Failed to download clip. YouTube might be blocking the request.");
+      
+      // Clean up the object URL after a short delay
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 1000);
+      
+    } catch (err: any) {
+      setError(err.message || "Failed to download clip. YouTube might be blocking the request.");
     } finally {
       setIsTrimming(false);
     }
