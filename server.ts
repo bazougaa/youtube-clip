@@ -12,6 +12,14 @@ import ytDlpExec from "yt-dlp-exec";
 
 const execFileAsync = promisify(execFile);
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
@@ -100,7 +108,7 @@ async function getVideoDetails(url: string) {
       }
     });
     
-    const formats: YtDlpFormat[] = info.formats.map(f => ({
+    const formats: YtDlpFormat[] = (info.formats || []).map(f => ({
       format_id: String(f.itag),
       ext: f.container,
       height: f.height,
@@ -364,7 +372,11 @@ async function startServer() {
 
       const filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
       res.download(clip.filePath, filename, async (downloadError) => {
-        await fs.rm(clip.tempDir, { recursive: true, force: true });
+        try {
+          await fs.rm(clip.tempDir, { recursive: true, force: true });
+        } catch (rmError) {
+          console.error("Failed to remove temp dir:", rmError);
+        }
         if (downloadError && !res.headersSent) {
           res.status(500).json({ error: "Failed to download clip" });
         }
@@ -401,7 +413,11 @@ async function startServer() {
       const qualityLabel = kind === "audio" ? "audio" : String(quality);
       const filename = `${title}_${qualityLabel}.${media.extension}`;
       res.download(media.filePath, filename, async (downloadError) => {
-        await fs.rm(media.tempDir, { recursive: true, force: true });
+        try {
+          await fs.rm(media.tempDir, { recursive: true, force: true });
+        } catch (rmError) {
+          console.error("Failed to remove temp dir:", rmError);
+        }
         if (downloadError && !res.headersSent) {
           res.status(500).json({ error: "Failed to download media" });
         }
@@ -475,6 +491,11 @@ async function startServer() {
       }
     });
   }
+
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("Express global error handler:", err);
+    res.status(500).json({ error: "Internal Server Error", details: err.message });
+  });
 
   // Only listen if not running in a serverless environment like Vercel
   if (!process.env.VERCEL) {
