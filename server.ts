@@ -2,14 +2,29 @@ import express from "express";
 import { execFile } from "child_process";
 import { createServer as createViteServer } from "vite";
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
+import ytDlpExec from "yt-dlp-exec";
 
 const execFileAsync = promisify(execFile);
-const ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
+// Check if local bin/yt-dlp exists, otherwise use yt-dlp-exec's binary
+let ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+if (!existsSync(ytDlpPath)) {
+  try {
+    const ytDlpExecPackageDir = path.dirname(require.resolve("yt-dlp-exec/package.json"));
+    ytDlpPath = path.join(ytDlpExecPackageDir, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+  } catch (e) {
+    console.warn("yt-dlp-exec binary not found via require.resolve");
+  }
+}
 
 async function getPlayableVideoUrl(url: string) {
   try {
@@ -23,29 +38,40 @@ async function getPlayableVideoUrl(url: string) {
     }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
     
     if (format && format.url) {
-      return format.url;
+      // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
+      const response = await fetch(format.url, { method: 'HEAD' });
+      if (response.ok) {
+        return format.url;
+      } else {
+        console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
+      }
     }
   } catch (ytdlError) {
     console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
   }
 
-  // Fallback to yt-dlp binary if available
-  const { stdout } = await execFileAsync(ytDlpPath, [
-    "--no-playlist",
-    "--no-warnings",
-    "--force-ipv4",
-    "-f",
-    "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
-    "--get-url",
-    url,
-  ]);
+  // Fallback to yt-dlp if available
+  try {
+    const { stdout } = await execFileAsync(ytDlpPath, [
+      "--no-playlist",
+      "--no-warnings",
+      "--force-ipv4",
+      "-f",
+      "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
+      "--get-url",
+      url,
+    ]);
 
-  const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  if (!streamUrl) {
-    throw new Error("yt-dlp did not return a playable URL");
+    const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    if (!streamUrl) {
+      throw new Error("yt-dlp did not return a playable URL");
+    }
+
+    return streamUrl;
+  } catch (ytDlpError) {
+    console.error("yt-dlp failed:", ytDlpError);
+    throw new Error("All methods to get stream URL failed.");
   }
-
-  return streamUrl;
 }
 
 type YtDlpFormat = {
