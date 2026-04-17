@@ -155,7 +155,7 @@ export default function App() {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const [embedUrl, setEmbedUrl] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [playerMode, setPlayerMode] = useState<"youtube" | "stream">("stream");
+  const [playerMode, setPlayerMode] = useState<"youtube" | "stream">("youtube");
   const [previewRange, setPreviewRange] = useState({ start: 0, end: 10 });
   const [activeHandle, setActiveHandle] = useState<"start" | "end" | null>(null);
   const [startInput, setStartInput] = useState(formatPreciseTime(0));
@@ -181,7 +181,7 @@ export default function App() {
     setThumbnailUrl(getYouTubeThumbnailUrl(videoUrl));
     setEmbedUrl(nextEmbedUrl);
     setStreamUrl(nextStreamUrl);
-    setPlayerMode("stream");
+    setPlayerMode("youtube");
     setDuration(0);
     setVideoQualities([]);
     setPreviewRange({ start: 0, end: 10 });
@@ -277,18 +277,6 @@ export default function App() {
 
     return () => window.clearTimeout(timeout);
   }, [endTime, playerMode, startTime, videoUrl]);
-
-  useEffect(() => {
-    if (!videoUrl || playerMode !== "youtube" || isPlayerReady) return;
-
-    const timeout = window.setTimeout(() => {
-      setPlayerMode("stream");
-      setIsPlayerReady(false);
-      setError("YouTube preview did not load, so I switched to the direct stream player.");
-    }, 8000);
-
-    return () => window.clearTimeout(timeout);
-  }, [isPlayerReady, playerMode, videoUrl]);
 
   useEffect(() => {
     if (!videoUrl || playerMode !== "stream" || isPlayerReady) return;
@@ -577,7 +565,7 @@ export default function App() {
                 Previewing {formatTime(previewRange.start)} to {formatTime(previewRange.end)}
               </div>
               <div className="rounded-lg border border-brand-red bg-brand-red/10 px-3 py-1.5 text-brand-red">
-                Default Player (Direct Stream)
+                {playerMode === "youtube" ? "Default Player (YouTube Embed)" : "Fallback Player (Direct Stream)"}
               </div>
             </div>
 
