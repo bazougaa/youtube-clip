@@ -401,14 +401,10 @@ export default function App() {
         throw new Error(errorMessage);
       }
 
-      // If it's OK, we can trigger the actual browser download prompt.
-      // Since we already fetched the response, we can create a blob URL to save it.
-      const blob = await response.blob();
-      
       // Extract filename from the Content-Disposition header if present
       let filename = "clip.mp4";
       const disposition = response.headers.get('Content-Disposition');
-      if (disposition && disposition.indexOf('attachment') !== -1) {
+      if (disposition && disposition.indexOf('filename=') !== -1) {
         const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
         const matches = filenameRegex.exec(disposition);
         if (matches != null && matches[1]) { 
@@ -416,17 +412,23 @@ export default function App() {
         }
       }
 
+      // If it's OK, we can trigger the actual browser download prompt.
+      // Since we already fetched the response, we can create a blob URL to save it.
+      const blob = await response.blob();
       const blobUrl = window.URL.createObjectURL(blob);
+      
       const a = document.createElement('a');
+      a.style.display = 'none';
       a.href = blobUrl;
       a.download = filename;
-      a.rel = "noopener";
       document.body.appendChild(a);
       a.click();
-      a.remove();
       
       // Clean up the object URL after a short delay
-      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 1000);
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+      }, 1000);
       
     } catch (err: any) {
       setError(err.message || "Failed to download clip. YouTube might be blocking the request.");
@@ -448,17 +450,50 @@ export default function App() {
         kind,
         quality,
       });
+
+      const response = await fetch(`/api/download-media?${params.toString()}`);
+      if (!response.ok) {
+        let errorMessage = "Failed to download media.";
+        try {
+          const errorData = await response.json();
+          if (errorData.error) {
+            errorMessage = errorData.error;
+          }
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(errorMessage);
+      }
+
+      let filename = kind === "audio" ? "audio.m4a" : "video.mp4";
+      const disposition = response.headers.get('Content-Disposition');
+      if (disposition && disposition.indexOf('filename=') !== -1) {
+        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+        const matches = filenameRegex.exec(disposition);
+        if (matches != null && matches[1]) { 
+          filename = matches[1].replace(/['"]/g, '');
+        }
+      }
+
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      
       const a = document.createElement('a');
-      a.href = `/api/download-media?${params.toString()}`;
-      a.rel = "noopener";
+      a.style.display = 'none';
+      a.href = blobUrl;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
-      a.remove();
-    } catch {
-      setError("Failed to download media. Try a lower quality or another video.");
+      
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+      }, 1000);
+      
+    } catch (err: any) {
+      setError(err.message || "Failed to download media. Try a lower quality or another video.");
     } finally {
-      // Keep brief visual feedback that the request was sent.
-      window.setTimeout(() => setActiveDownload(null), 800);
+      setActiveDownload(null);
     }
   };
 

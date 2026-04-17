@@ -463,6 +463,11 @@ async function startServer() {
       }
 
       const filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
+      
+      // Ensure we send correct disposition headers
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', 'video/mp4');
+
       res.download(clip.filePath, filename, async (downloadError) => {
         try {
           await fs.rm(clip.tempDir, { recursive: true, force: true });
@@ -504,6 +509,10 @@ async function startServer() {
 
       const qualityLabel = kind === "audio" ? "audio" : String(quality);
       const filename = `${title}_${qualityLabel}.${media.extension}`;
+
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', kind === "audio" ? 'audio/m4a' : 'video/mp4');
+
       res.download(media.filePath, filename, async (downloadError) => {
         try {
           await fs.rm(media.tempDir, { recursive: true, force: true });
