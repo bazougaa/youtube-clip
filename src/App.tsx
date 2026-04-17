@@ -174,7 +174,7 @@ export default function App() {
       return;
     }
 
-    const nextEmbedUrl = getYouTubeEmbedUrl(videoUrl);
+    const nextEmbedUrl = `/api/stream?url=${encodeURIComponent(videoUrl)}`;
     setIsPlayerReady(false);
     setThumbnailUrl(getYouTubeThumbnailUrl(videoUrl));
     setEmbedUrl(nextEmbedUrl);
@@ -265,7 +265,7 @@ export default function App() {
 
     const timeout = window.setTimeout(() => {
       setPreviewRange({ start: startTime, end: endTime });
-      setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
+      setEmbedUrl(`/api/stream?url=${encodeURIComponent(videoUrl)}`);
       setIsPlayerReady(false);
     }, 500);
 
@@ -370,7 +370,9 @@ export default function App() {
 
     setPreviewRange({ start: startTime, end: endTime });
     setIsPlayerReady(false);
-    setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
+    // Force player to re-mount by momentarily setting it to null
+    setEmbedUrl(null);
+    setTimeout(() => setEmbedUrl(`/api/stream?url=${encodeURIComponent(videoUrl)}`), 50);
   };
 
   // Trimming logic
@@ -539,25 +541,44 @@ export default function App() {
               )}
               
               {embedUrl && (
-                <div className="absolute inset-0 w-full h-full">
-                  <ReactPlayer
+                <div className="absolute inset-0 w-full h-full z-30">
+                  {embedUrl.includes("youtube.com/embed") ? (
+                    <iframe
+                      src={embedUrl}
+                      title="YouTube preview"
+                      className="absolute inset-0 w-full h-full"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                      onLoad={() => setIsPlayerReady(true)}
+                    />
+                  ) : (
+                    <ReactPlayer
                     // @ts-ignore - ReactPlayer types conflict with React 19 currently
-                    url={`/api/stream?url=${encodeURIComponent(videoUrl)}`}
+                    url={embedUrl}
                     controls={true}
                     playing={true}
-                    width="100%"
-                    height="100%"
-                    onReady={() => setIsPlayerReady(true)}
-                    config={
-                      {
-                        file: {
-                          attributes: {
-                            crossOrigin: "anonymous",
+                      width="100%"
+                      height="100%"
+                      onReady={() => setIsPlayerReady(true)}
+                      onError={(e) => {
+                        console.error("ReactPlayer Error:", e);
+                        // If the native proxy stream fails, fallback to the standard YouTube embed
+                        // This ensures the player always works, even if YouTube blocks our backend proxy
+                        setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
+                      }}
+                      config={
+                        {
+                          file: {
+                            forceVideo: true,
+                            attributes: {
+                              crossOrigin: "anonymous",
+                              preload: "auto",
+                            },
                           },
-                        },
-                      } as any
-                    }
-                  />
+                        } as any
+                      }
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -567,7 +588,7 @@ export default function App() {
                 Previewing {formatTime(previewRange.start)} to {formatTime(previewRange.end)}
               </div>
               <div className="rounded-lg border border-brand-red bg-brand-red/10 px-3 py-1.5 text-brand-red">
-                Native Player (Proxy Stream)
+                {embedUrl && embedUrl.includes("youtube.com/embed") ? "Default Player (YouTube Embed)" : "Native Player (Proxy Stream)"}
               </div>
             </div>
 
