@@ -1,5 +1,5 @@
 import express from "express";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
@@ -9,6 +9,31 @@ import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
 
 const execFileAsync = promisify(execFile);
+
+function runSpawn(command: string, args: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "ignore" });
+    
+    const timeoutId = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Process timed out"));
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeoutId);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Process exited with code ${code}`));
+      }
+    });
+  });
+}
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -277,10 +302,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
   args.push(url);
 
   try {
-    await execFileAsync(ytDlpPath, args, {
-      maxBuffer: 1024 * 1024 * 20,
-      timeout: 1000 * 60 * 10,
-    });
+    await runSpawn(ytDlpPath, args, 1000 * 60 * 10); // 10 minute timeout
 
     const files = await fs.readdir(tempDir);
     const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
@@ -336,10 +358,7 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   args.push(url);
 
   try {
-    await execFileAsync(ytDlpPath, args, {
-      maxBuffer: 1024 * 1024 * 20,
-      timeout: 1000 * 60 * 30,
-    });
+    await runSpawn(ytDlpPath, args, 1000 * 60 * 30); // 30 minute timeout
 
     const files = await fs.readdir(tempDir);
     const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];

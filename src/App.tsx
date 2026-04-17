@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
+import ReactPlayer from 'react-player';
+
 function getYouTubeVideoId(url: string): string | null {
   try {
     const u = new URL(url);
@@ -501,14 +503,26 @@ export default function App() {
               )}
               
               {embedUrl && (
-                <iframe
-                  src={embedUrl}
-                  title="YouTube preview"
-                  className="absolute inset-0 w-full h-full"
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                  allowFullScreen
-                  onLoad={() => setIsPlayerReady(true)}
-                />
+                <div className="absolute inset-0 w-full h-full">
+                  <ReactPlayer
+                    // @ts-ignore - ReactPlayer types conflict with React 19 currently
+                    url={`/api/stream?url=${encodeURIComponent(videoUrl)}`}
+                    controls={true}
+                    playing={true}
+                    width="100%"
+                    height="100%"
+                    onReady={() => setIsPlayerReady(true)}
+                    config={
+                      {
+                        file: {
+                          attributes: {
+                            crossOrigin: "anonymous",
+                          },
+                        },
+                      } as any
+                    }
+                  />
+                </div>
               )}
             </div>
 
@@ -517,7 +531,7 @@ export default function App() {
                 Previewing {formatTime(previewRange.start)} to {formatTime(previewRange.end)}
               </div>
               <div className="rounded-lg border border-brand-red bg-brand-red/10 px-3 py-1.5 text-brand-red">
-                Default Player (YouTube Embed)
+                Native Player (Proxy Stream)
               </div>
             </div>
 
