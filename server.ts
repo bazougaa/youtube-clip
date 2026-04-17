@@ -163,7 +163,7 @@ async function getVideoDetails(url: string) {
     // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
     // Add a hard timeout so serverless requests fail fast into fallback metadata.
     const info = await withTimeout(
-      ytdl.getBasicInfo(url, {
+      ytdl.getInfo(url, {
         requestOptions: {
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -186,6 +186,12 @@ async function getVideoDetails(url: string) {
       acodec: f.hasAudio ? f.audioCodec : "none",
       filesize: Number(f.contentLength) || undefined,
     }));
+
+    // If ytdl-core decipher failed, it often returns very few or 0 formats.
+    // Force yt-dlp fallback if we don't get a good list of qualities.
+    if (formats.length < 5) {
+      throw new Error("ytdl-core returned too few formats, likely due to decipher failure.");
+    }
 
     return {
       title: info.videoDetails.title,
