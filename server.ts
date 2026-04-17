@@ -102,20 +102,25 @@ async function getPlayableVideoUrl(url: string) {
     // Attempt to use ytdl-core first for Vercel compatibility
     const info = await ytdl.getInfo(url);
     
-    // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
-    // So we use a custom filter to ensure we get a combined mp4 stream if possible.
-    const format = ytdl.chooseFormat(info.formats, { 
-      filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio 
-    }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-    
-    if (format && format.url) {
-      // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
-      const response = await fetch(format.url, { method: 'HEAD' });
-      if (response.ok) {
-        return format.url;
-      } else {
-        console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
+    // Check if decipher failed based on number of formats
+    if (info.formats && info.formats.length >= 5) {
+      // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
+      // So we use a custom filter to ensure we get a combined mp4 stream if possible.
+      const format = ytdl.chooseFormat(info.formats, { 
+        filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio 
+      }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+      
+      if (format && format.url) {
+        // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
+        const response = await fetch(format.url, { method: 'HEAD' });
+        if (response.ok) {
+          return format.url;
+        } else {
+          console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
+        }
       }
+    } else {
+      console.warn("ytdl-core returned too few formats, skipping to yt-dlp stream URL lookup.");
     }
   } catch (ytdlError) {
     console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
