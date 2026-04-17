@@ -12,8 +12,19 @@ const execFileAsync = promisify(execFile);
 
 function runSpawn(command: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "ignore" });
+    let stderrData = "";
+    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
     
+    if (child.stderr) {
+      child.stderr.on("data", (data) => {
+        stderrData += data.toString();
+        // keep stderr bounded to avoid memory issues
+        if (stderrData.length > 50000) {
+          stderrData = stderrData.slice(-50000);
+        }
+      });
+    }
+
     const timeoutId = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error("Process timed out"));
@@ -29,7 +40,8 @@ function runSpawn(command: string, args: string[], timeoutMs: number): Promise<v
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Process exited with code ${code}`));
+        console.error(`yt-dlp exited with code ${code}\nStderr: ${stderrData}`);
+        reject(new Error(`Process exited with code ${code}: ${stderrData}`));
       }
     });
   });
@@ -72,15 +84,17 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-// Check if local bin/yt-dlp exists, otherwise use yt-dlp-exec's binary
-let ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+// Resolve yt-dlp binary path
+const isWindows = os.platform() === 'win32';
+const ytDlpFilename = isWindows ? 'yt-dlp.exe' : 'yt-dlp';
+
+const ytDlpPath =
+  process.env.NODE_ENV === "production" && process.env.VERCEL
+    ? path.join(process.cwd(), "bin", "yt-dlp")
+    : path.join(process.cwd(), "bin", ytDlpFilename);
+
 if (!existsSync(ytDlpPath)) {
-  try {
-    const ytDlpExecPackageDir = path.dirname(require.resolve("yt-dlp-exec/package.json"));
-    ytDlpPath = path.join(ytDlpExecPackageDir, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
-  } catch (e) {
-    console.warn("yt-dlp-exec binary not found via require.resolve");
-  }
+  console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
 
 async function getPlayableVideoUrl(url: string) {
@@ -302,6 +316,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
   args.push(url);
 
   try {
+    console.log("Running yt-dlp to trim video:", ytDlpPath, args);
     await runSpawn(ytDlpPath, args, 1000 * 60 * 10); // 10 minute timeout
 
     const files = await fs.readdir(tempDir);
@@ -407,6 +422,11 @@ async function startServer() {
     try {
       console.log(`Trimming video: ${url} from ${startTime} to ${endTime}`);
       const clip = await createTrimmedClip(url, startTime, endTime);
+      
+      if (!clip || !clip.filePath || !existsSync(clip.filePath)) {
+        throw new Error("Clip file was not generated properly.");
+      }
+
       let title = "youtube_clip";
       try {
         const metadata = await getVideoMetadata(url);
@@ -427,9 +447,9 @@ async function startServer() {
         }
       });
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error processing video:', error);
-      res.status(500).json({ error: "Failed to process video. YouTube might be blocking the request." });
+      res.status(500).json({ error: error.message || "Failed to process video. YouTube might be blocking the request." });
     }
   });
 
