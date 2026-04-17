@@ -1,6 +1,5 @@
 import express from "express";
 import { execFile } from "child_process";
-import { createServer as createViteServer } from "vite";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
@@ -8,7 +7,6 @@ import path from "path";
 import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
-import ytDlpExec from "yt-dlp-exec";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,6 +20,32 @@ process.on('uncaughtException', (error) => {
 
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
+
+const FALLBACK_DURATION_SECONDS = 600;
+const METADATA_TIMEOUT_MS = 12000;
+
+function fallbackVideoDetails() {
+  return {
+    title: "YouTube Video",
+    duration: FALLBACK_DURATION_SECONDS,
+    formats: [] as YtDlpFormat[],
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
 
 // Check if local bin/yt-dlp exists, otherwise use yt-dlp-exec's binary
 let ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
@@ -98,17 +122,22 @@ type YtDlpFormat = {
 async function getVideoDetails(url: string) {
   try {
     // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
-    // Add simple fallback agents to help bypass YouTube blocks on Vercel datacenter IPs
-    const info = await ytdl.getBasicInfo(url, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
-        }
-      }
-    });
-    
-    const formats: YtDlpFormat[] = (info.formats || []).map(f => ({
+    // Add a hard timeout so serverless requests fail fast into fallback metadata.
+    const info = await withTimeout(
+      ytdl.getBasicInfo(url, {
+        requestOptions: {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        },
+      }),
+      METADATA_TIMEOUT_MS,
+      "ytdl-core metadata lookup timed out",
+    );
+
+    const formatList = Array.isArray((info as { formats?: unknown }).formats) ? info.formats : [];
+    const formats: YtDlpFormat[] = formatList.map((f) => ({
       format_id: String(f.itag),
       ext: f.container,
       height: f.height,
@@ -118,29 +147,21 @@ async function getVideoDetails(url: string) {
       acodec: f.hasAudio ? f.audioCodec : "none",
       filesize: Number(f.contentLength) || undefined,
     }));
-    
+
     return {
       title: info.videoDetails.title,
       duration: Number(info.videoDetails.lengthSeconds),
-      formats
+      formats,
     };
   } catch (ytdlError) {
-    console.warn("ytdl-core metadata lookup failed, attempting oEmbed fallback:", ytdlError);
-    
-    // VERCEL FALLBACK: If ytdl-core is blocked and yt-dlp binary is missing, we must have duration.
-    // Unfortunately oEmbed doesn't provide duration. We will fallback to returning a default duration 
-    // to prevent the UI from crashing if all metadata methods fail on Vercel.
-    try {
-      if (process.env.VERCEL) {
-         console.warn("Running on Vercel, returning fallback metadata to prevent UI crash.");
-         return {
-           title: "YouTube Video",
-           duration: 60 * 60, // Fallback to 1 hour if we absolutely cannot read it, so the slider at least renders
-           formats: []
-         };
-      }
+    console.warn("ytdl-core metadata lookup failed, attempting yt-dlp fallback:", ytdlError);
 
-      // Fallback to yt-dlp binary if available (local dev)
+    if (!existsSync(ytDlpPath)) {
+      console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
+      return fallbackVideoDetails();
+    }
+
+    try {
       const { stdout } = await execFileAsync(ytDlpPath, [
         "--no-playlist",
         "--no-warnings",
@@ -154,10 +175,15 @@ async function getVideoDetails(url: string) {
         timeout: 1000 * 45,
       });
 
-      return JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
+      const parsed = JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
+      return {
+        title: parsed.title || "YouTube Video",
+        duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
+        formats: Array.isArray(parsed.formats) ? parsed.formats : [],
+      };
     } catch (fallbackError) {
-       console.error("All metadata fallbacks failed:", fallbackError);
-       throw fallbackError;
+      console.error("All metadata fallbacks failed, returning safe defaults:", fallbackError);
+      return fallbackVideoDetails();
     }
   }
 }
@@ -448,7 +474,7 @@ async function startServer() {
       // Fail soft: keep the app usable even when metadata providers are blocked.
       res.status(200).json({
         title: "YouTube video",
-        duration: 600,
+        duration: FALLBACK_DURATION_SECONDS,
         qualities: [],
         warning: "Could not read exact duration, using a fallback so preview can continue.",
       });
@@ -474,7 +500,8 @@ async function startServer() {
 
   // Vite middleware for development (disabled in Vercel production)
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
-    const vite = await createViteServer({
+    const { createServer } = await import("vite");
+    const vite = await createServer({
       server: { middlewareMode: true },
       appType: "custom",
     });
