@@ -1,4 +1,10 @@
 {
+  "functions": {
+    "server.js": {
+      "maxDuration": 60,
+      "includeFiles": "node_modules/yt-dlp-exec/bin/**"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",

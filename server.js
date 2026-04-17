@@ -2,45 +2,70 @@ import express from "express";
 import { execFile } from "child_process";
 import { createServer as createViteServer } from "vite";
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
 const execFileAsync = promisify(execFile);
-const ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+// Check if local bin/yt-dlp exists, otherwise use yt-dlp-exec's binary
+let ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+if (!existsSync(ytDlpPath)) {
+    try {
+        const ytDlpExecPackageDir = path.dirname(require.resolve("yt-dlp-exec/package.json"));
+        ytDlpPath = path.join(ytDlpExecPackageDir, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+    }
+    catch (e) {
+        console.warn("yt-dlp-exec binary not found via require.resolve");
+    }
+}
 async function getPlayableVideoUrl(url) {
     try {
         // Attempt to use ytdl-core first for Vercel compatibility
         const info = await ytdl.getInfo(url);
-        
         // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
         // So we use a custom filter to ensure we get a combined mp4 stream if possible.
-        const format = ytdl.chooseFormat(info.formats, { 
-            filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio 
+        const format = ytdl.chooseFormat(info.formats, {
+            filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio
         }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-        
         if (format && format.url) {
-            return format.url;
+            // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
+            const response = await fetch(format.url, { method: 'HEAD' });
+            if (response.ok) {
+                return format.url;
+            }
+            else {
+                console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
+            }
         }
-    } catch (ytdlError) {
+    }
+    catch (ytdlError) {
         console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
     }
-    // Fallback to yt-dlp binary if available
-    const { stdout } = await execFileAsync(ytDlpPath, [
-        "--no-playlist",
-        "--no-warnings",
-        "--force-ipv4",
-        "-f",
-        "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
-        "--get-url",
-        url,
-    ]);
-    const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    if (!streamUrl) {
-        throw new Error("yt-dlp did not return a playable URL");
+    // Fallback to yt-dlp if available
+    try {
+        const { stdout } = await execFileAsync(ytDlpPath, [
+            "--no-playlist",
+            "--no-warnings",
+            "--force-ipv4",
+            "-f",
+            "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
+            "--get-url",
+            url,
+        ]);
+        const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+        if (!streamUrl) {
+            throw new Error("yt-dlp did not return a playable URL");
+        }
+        return streamUrl;
     }
-    return streamUrl;
+    catch (ytDlpError) {
+        console.error("yt-dlp failed:", ytDlpError);
+        throw new Error("All methods to get stream URL failed.");
+    }
 }
 async function getVideoDetails(url) {
     try {
@@ -54,7 +79,7 @@ async function getVideoDetails(url) {
                 }
             }
         });
-        const formats = info.formats.map(f => ({
+        const formats = (info.formats || []).map(f => ({
             format_id: String(f.itag),
             ext: f.container,
             height: f.height,
@@ -64,15 +89,14 @@ async function getVideoDetails(url) {
             acodec: f.hasAudio ? f.audioCodec : "none",
             filesize: Number(f.contentLength) || undefined,
         }));
-        
         return {
             title: info.videoDetails.title,
             duration: Number(info.videoDetails.lengthSeconds),
             formats
         };
-    } catch (ytdlError) {
+    }
+    catch (ytdlError) {
         console.warn("ytdl-core metadata lookup failed, attempting oEmbed fallback:", ytdlError);
-        
         // VERCEL FALLBACK: If ytdl-core is blocked and yt-dlp binary is missing, we must have duration.
         // Unfortunately oEmbed doesn't provide duration. We will fallback to returning a default duration 
         // to prevent the UI from crashing if all metadata methods fail on Vercel.
@@ -85,7 +109,6 @@ async function getVideoDetails(url) {
                     formats: []
                 };
             }
-
             // Fallback to yt-dlp binary if available (local dev)
             const { stdout } = await execFileAsync(ytDlpPath, [
                 "--no-playlist",
@@ -100,7 +123,8 @@ async function getVideoDetails(url) {
                 timeout: 1000 * 45,
             });
             return JSON.parse(stdout);
-        } catch (fallbackError) {
+        }
+        catch (fallbackError) {
             console.error("All metadata fallbacks failed:", fallbackError);
             throw fallbackError;
         }
@@ -249,12 +273,11 @@ async function createMediaDownload(url, kind, quality) {
 }
 // Initialize express app outside startServer so Vercel can find it immediately
 const app = express();
-
+const PORT = Number(process.env.PORT ?? 3000);
+if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`Invalid PORT value: ${process.env.PORT}`);
+}
 async function startServer() {
-    const PORT = Number(process.env.PORT ?? 3000);
-    if (!Number.isInteger(PORT) || PORT <= 0) {
-        throw new Error(`Invalid PORT value: ${process.env.PORT}`);
-    }
     app.use(express.json());
     // API Route for trimming
     app.get("/api/trim", async (req, res) => {
@@ -292,7 +315,6 @@ async function startServer() {
             res.status(500).json({ error: "Failed to process video. YouTube might be blocking the request." });
         }
     });
-
     app.get("/api/download-media", async (req, res) => {
         const { url, kind = "video", quality = "best" } = req.query;
         if (!url || typeof url !== 'string') {
@@ -328,11 +350,9 @@ async function startServer() {
             }
         }
     });
-
     app.get("/api/frame", async (req, res) => {
         res.status(501).json({ error: "Frame extraction is currently unavailable." });
     });
-
     app.get("/api/video-info", async (req, res) => {
         const { url } = req.query;
         if (!url || typeof url !== 'string') {
@@ -353,7 +373,6 @@ async function startServer() {
             });
         }
     });
-
     app.get("/api/stream", async (req, res) => {
         const { url } = req.query;
         if (!url || typeof url !== 'string') {
@@ -370,17 +389,17 @@ async function startServer() {
             }
         }
     });
-
     // Vite middleware for development (disabled in Vercel production)
     if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
         const vite = await createViteServer({
             server: { middlewareMode: true },
-            appType: "spa",
+            appType: "custom",
         });
         app.use(vite.middlewares);
     }
     else {
-        const distPath = path.join(process.cwd(), 'dist');
+        // Serve static files in production
+        const distPath = path.join(process.cwd(), "dist");
         app.use(express.static(distPath));
         app.get('*', (req, res) => {
             if (!req.path.startsWith("/api/")) {
@@ -388,7 +407,6 @@ async function startServer() {
             }
         });
     }
-    
     // Only listen if not running in a serverless environment like Vercel
     if (!process.env.VERCEL) {
         app.listen(PORT, "0.0.0.0", () => {
@@ -397,6 +415,5 @@ async function startServer() {
     }
 }
 startServer();
-
 // Export for Vercel serverless
 export default app;
