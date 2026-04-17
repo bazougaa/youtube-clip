@@ -553,10 +553,11 @@ export default function App() {
                     />
                   ) : (
                     <ReactPlayer
-                    // @ts-ignore - ReactPlayer types conflict with React 19 currently
-                    url={embedUrl}
-                    controls={true}
-                    playing={true}
+                      // @ts-ignore - ReactPlayer types conflict with React 19 currently
+                      url={embedUrl}
+                      controls={true}
+                      playing={true}
+                      muted={true}
                       width="100%"
                       height="100%"
                       onReady={() => setIsPlayerReady(true)}
