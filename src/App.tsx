@@ -154,8 +154,6 @@ export default function App() {
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const [embedUrl, setEmbedUrl] = useState<string | null>(null);
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [playerMode, setPlayerMode] = useState<"youtube" | "stream">("youtube");
   const [previewRange, setPreviewRange] = useState({ start: 0, end: 10 });
   const [activeHandle, setActiveHandle] = useState<"start" | "end" | null>(null);
   const [startInput, setStartInput] = useState(formatPreciseTime(0));
@@ -169,19 +167,15 @@ export default function App() {
       setIsPlayerReady(false);
       setThumbnailUrl(null);
       setEmbedUrl(null);
-      setStreamUrl(null);
       setDuration(0);
       setVideoQualities([]);
       return;
     }
 
     const nextEmbedUrl = getYouTubeEmbedUrl(videoUrl);
-    const nextStreamUrl = `/api/stream?url=${encodeURIComponent(videoUrl)}`;
     setIsPlayerReady(false);
     setThumbnailUrl(getYouTubeThumbnailUrl(videoUrl));
     setEmbedUrl(nextEmbedUrl);
-    setStreamUrl(nextStreamUrl);
-    setPlayerMode("youtube");
     setDuration(0);
     setVideoQualities([]);
     setPreviewRange({ start: 0, end: 10 });
@@ -269,26 +263,12 @@ export default function App() {
 
     const timeout = window.setTimeout(() => {
       setPreviewRange({ start: startTime, end: endTime });
-      if (playerMode === "youtube") {
-        setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
-        setIsPlayerReady(false);
-      }
+      setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
+      setIsPlayerReady(false);
     }, 500);
 
     return () => window.clearTimeout(timeout);
-  }, [endTime, playerMode, startTime, videoUrl]);
-
-  useEffect(() => {
-    if (!videoUrl || playerMode !== "stream" || isPlayerReady) return;
-
-    const timeout = window.setTimeout(() => {
-      setError("Player is taking too long to load. Click Preview Selected Clip to retry.");
-      // Stop showing endless loading spinner.
-      setIsPlayerReady(true);
-    }, 12000);
-
-    return () => window.clearTimeout(timeout);
-  }, [isPlayerReady, playerMode, videoUrl, streamUrl]);
+  }, [endTime, startTime, videoUrl]);
 
   // Handle URL changes
   const handleUrlSubmit = (e: React.FormEvent) => {
@@ -388,12 +368,7 @@ export default function App() {
 
     setPreviewRange({ start: startTime, end: endTime });
     setIsPlayerReady(false);
-
-    if (playerMode === "youtube") {
-      setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
-    } else {
-      setStreamUrl(`/api/stream?url=${encodeURIComponent(videoUrl)}&preview=${Date.now()}`);
-    }
+    setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
   };
 
   // Trimming logic
@@ -516,7 +491,7 @@ export default function App() {
                   referrerPolicy="no-referrer"
                 />
               )}
-              {!isPlayerReady && !error && ((playerMode === "youtube" && embedUrl) || (playerMode === "stream" && streamUrl)) && (
+              {!isPlayerReady && !error && embedUrl && (
                 <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                   <div className="flex items-center gap-2 bg-black/60 border border-white/10 rounded-full px-4 py-2 text-sm text-white/90">
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -525,7 +500,7 @@ export default function App() {
                 </div>
               )}
               
-              {embedUrl && playerMode === "youtube" && (
+              {embedUrl && (
                 <iframe
                   src={embedUrl}
                   title="YouTube preview"
@@ -535,29 +510,6 @@ export default function App() {
                   onLoad={() => setIsPlayerReady(true)}
                 />
               )}
-
-              {streamUrl && playerMode === "stream" && (
-                <video
-                  src={streamUrl}
-                  className="absolute inset-0 w-full h-full object-contain"
-                  controls
-                  autoPlay
-                  onLoadedMetadata={(e) => {
-                    e.currentTarget.currentTime = previewRange.start;
-                    setIsPlayerReady(true);
-                  }}
-                  onTimeUpdate={(e) => {
-                    if (e.currentTarget.currentTime >= previewRange.end) {
-                      e.currentTarget.pause();
-                    }
-                  }}
-                  onError={() => {
-                    setError("The direct stream player could not load this video.");
-                    // Hide loading overlay and let user retry.
-                    setIsPlayerReady(true);
-                  }}
-                />
-              )}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-zinc-400">
@@ -565,7 +517,7 @@ export default function App() {
                 Previewing {formatTime(previewRange.start)} to {formatTime(previewRange.end)}
               </div>
               <div className="rounded-lg border border-brand-red bg-brand-red/10 px-3 py-1.5 text-brand-red">
-                {playerMode === "youtube" ? "Default Player (YouTube Embed)" : "Fallback Player (Direct Stream)"}
+                Default Player (YouTube Embed)
               </div>
             </div>
 
