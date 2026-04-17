@@ -1,6 +1,6 @@
 {
   "functions": {
-    "server.js": {
+    "api/index.js": {
       "maxDuration": 60,
       "includeFiles": "node_modules/{yt-dlp-exec,ffmpeg-static}/**"
     }
@@ -8,7 +8,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/server.js"
+      "destination": "/api/index.js"
     },
     {
       "source": "/(.*)",
