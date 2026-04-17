@@ -12,8 +12,6 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
-import ReactPlayer from 'react-player';
-
 function getYouTubeVideoId(url: string): string | null {
   try {
     const u = new URL(url);
@@ -174,7 +172,7 @@ export default function App() {
       return;
     }
 
-    const nextEmbedUrl = `/api/stream?url=${encodeURIComponent(videoUrl)}`;
+    const nextEmbedUrl = `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`;
     setIsPlayerReady(false);
     setThumbnailUrl(getYouTubeThumbnailUrl(videoUrl));
     setEmbedUrl(nextEmbedUrl);
@@ -265,7 +263,7 @@ export default function App() {
 
     const timeout = window.setTimeout(() => {
       setPreviewRange({ start: startTime, end: endTime });
-      setEmbedUrl(`/api/stream?url=${encodeURIComponent(videoUrl)}`);
+      setEmbedUrl(`/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`);
       setIsPlayerReady(false);
     }, 500);
 
@@ -372,7 +370,7 @@ export default function App() {
     setIsPlayerReady(false);
     // Force player to re-mount by momentarily setting it to null
     setEmbedUrl(null);
-    setTimeout(() => setEmbedUrl(`/api/stream?url=${encodeURIComponent(videoUrl)}`), 50);
+    setTimeout(() => setEmbedUrl(`/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`), 50);
   };
 
   // Trimming logic
@@ -552,32 +550,20 @@ export default function App() {
                       onLoad={() => setIsPlayerReady(true)}
                     />
                   ) : (
-                    <ReactPlayer
-                      // @ts-ignore - ReactPlayer types conflict with React 19 currently
-                      url={embedUrl}
-                      controls={true}
-                      playing={true}
-                      muted={true}
-                      width="100%"
-                      height="100%"
-                      onReady={() => setIsPlayerReady(true)}
+                    <video
+                      src={embedUrl}
+                      controls
+                      autoPlay
+                      muted
+                      playsInline
+                      className="absolute inset-0 w-full h-full object-contain bg-black"
+                      onLoadedData={() => setIsPlayerReady(true)}
+                      onPlaying={() => setIsPlayerReady(true)}
                       onError={(e) => {
-                        console.error("ReactPlayer Error:", e);
-                        // If the native proxy stream fails, fallback to the standard YouTube embed
-                        // This ensures the player always works, even if YouTube blocks our backend proxy
+                        console.error("Native Video Error:", e);
+                        setIsPlayerReady(true);
                         setEmbedUrl(getYouTubeClipEmbedUrl(videoUrl, startTime, endTime));
                       }}
-                      config={
-                        {
-                          file: {
-                            forceVideo: true,
-                            attributes: {
-                              crossOrigin: "anonymous",
-                              preload: "auto",
-                            },
-                          },
-                        } as any
-                      }
                     />
                   )}
                 </div>

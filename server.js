@@ -1,5 +1,5 @@
 import express from "express";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
@@ -8,15 +8,45 @@ import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
 const execFileAsync = promisify(execFile);
-
+function runSpawn(command, args, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        let stderrData = "";
+        const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+        if (child.stderr) {
+            child.stderr.on("data", (data) => {
+                stderrData += data.toString();
+                // keep stderr bounded to avoid memory issues
+                if (stderrData.length > 50000) {
+                    stderrData = stderrData.slice(-50000);
+                }
+            });
+        }
+        const timeoutId = setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(new Error("Process timed out"));
+        }, timeoutMs);
+        child.on("error", (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+        });
+        child.on("close", (code) => {
+            clearTimeout(timeoutId);
+            if (code === 0) {
+                resolve();
+            }
+            else {
+                console.error(`yt-dlp exited with code ${code}\nStderr: ${stderrData}`);
+                reject(new Error(`Process exited with code ${code}: ${stderrData}`));
+            }
+        });
+    });
+}
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
-
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+    console.error('Uncaught Exception:', error);
 });
-
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const FALLBACK_DURATION_SECONDS = 600;
@@ -42,35 +72,39 @@ function withTimeout(promise, timeoutMs, message) {
         });
     });
 }
-// Check if local bin/yt-dlp exists, otherwise use yt-dlp-exec's binary
-let ytDlpPath = path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+// Resolve yt-dlp binary path
+const isWindows = os.platform() === 'win32';
+const ytDlpFilename = isWindows ? 'yt-dlp.exe' : 'yt-dlp';
+const ytDlpPath = process.env.NODE_ENV === "production" && process.env.VERCEL
+    ? path.join(process.cwd(), "bin", "yt-dlp")
+    : path.join(process.cwd(), "bin", ytDlpFilename);
 if (!existsSync(ytDlpPath)) {
-    try {
-        const ytDlpExecPackageDir = path.dirname(require.resolve("yt-dlp-exec/package.json"));
-        ytDlpPath = path.join(ytDlpExecPackageDir, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
-    }
-    catch (e) {
-        console.warn("yt-dlp-exec binary not found via require.resolve");
-    }
+    console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
 async function getPlayableVideoUrl(url) {
     try {
         // Attempt to use ytdl-core first for Vercel compatibility
         const info = await ytdl.getInfo(url);
-        // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
-        // So we use a custom filter to ensure we get a combined mp4 stream if possible.
-        const format = ytdl.chooseFormat(info.formats, {
-            filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio
-        }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-        if (format && format.url) {
-            // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
-            const response = await fetch(format.url, { method: 'HEAD' });
-            if (response.ok) {
-                return format.url;
+        // Check if decipher failed based on number of formats
+        if (info.formats && info.formats.length >= 5) {
+            // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
+            // So we use a custom filter to ensure we get a combined mp4 stream if possible.
+            const format = ytdl.chooseFormat(info.formats, {
+                filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio
+            }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+            if (format && format.url) {
+                // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
+                const response = await fetch(format.url, { method: 'HEAD' });
+                if (response.ok) {
+                    return format.url;
+                }
+                else {
+                    console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
+                }
             }
-            else {
-                console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
-            }
+        }
+        else {
+            console.warn("ytdl-core returned too few formats, skipping to yt-dlp stream URL lookup.");
         }
     }
     catch (ytdlError) {
@@ -91,18 +125,26 @@ async function getPlayableVideoUrl(url) {
         if (!streamUrl) {
             throw new Error("yt-dlp did not return a playable URL");
         }
+        // Double check the stream URL actually works, because yt-dlp can sometimes return 403s on Windows
+        const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
+        if (!verifyResponse.ok) {
+            throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
+        }
         return streamUrl;
     }
     catch (ytDlpError) {
         console.error("yt-dlp failed:", ytDlpError);
-        throw new Error("All methods to get stream URL failed.");
     }
+    // If both node libraries fail, return the embedded youtube URL directly for the player
+    // This ensures the frontend doesn't crash entirely and can at least fall back to youtube embed
+    console.warn("All direct stream methods failed, falling back to standard youtube watch url");
+    return url;
 }
 async function getVideoDetails(url) {
     try {
         // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
         // Add a hard timeout so serverless requests fail fast into fallback metadata.
-        const info = await withTimeout(ytdl.getBasicInfo(url, {
+        const info = await withTimeout(ytdl.getInfo(url, {
             requestOptions: {
                 headers: {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -121,10 +163,15 @@ async function getVideoDetails(url) {
             acodec: f.hasAudio ? f.audioCodec : "none",
             filesize: Number(f.contentLength) || undefined,
         }));
+        // If ytdl-core decipher failed, it often returns very few or 0 formats.
+        // Force yt-dlp fallback if we don't get a good list of qualities.
+        if (formats.length < 5) {
+            throw new Error("ytdl-core returned too few formats, likely due to decipher failure.");
+        }
         return {
             title: info.videoDetails.title,
             duration: Number(info.videoDetails.lengthSeconds),
-            formats
+            formats,
         };
     }
     catch (ytdlError) {
@@ -229,10 +276,8 @@ async function createTrimmedClip(url, startTime, endTime) {
     }
     args.push(url);
     try {
-        await execFileAsync(ytDlpPath, args, {
-            maxBuffer: 1024 * 1024 * 20,
-            timeout: 1000 * 60 * 10,
-        });
+        console.log("Running yt-dlp to trim video:", ytDlpPath, args);
+        await runSpawn(ytDlpPath, args, 1000 * 60 * 10); // 10 minute timeout
         const files = await fs.readdir(tempDir);
         const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
         if (!clipFile) {
@@ -280,10 +325,7 @@ async function createMediaDownload(url, kind, quality) {
     }
     args.push(url);
     try {
-        await execFileAsync(ytDlpPath, args, {
-            maxBuffer: 1024 * 1024 * 20,
-            timeout: 1000 * 60 * 30,
-        });
+        await runSpawn(ytDlpPath, args, 1000 * 60 * 30); // 30 minute timeout
         const files = await fs.readdir(tempDir);
         const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
         if (!mediaFile) {
@@ -308,6 +350,11 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
 }
 async function startServer() {
     app.use(express.json());
+    // Add a simple request logger
+    app.use((req, res, next) => {
+        console.log(`[${req.method}] ${req.url}`);
+        next();
+    });
     // API Route for trimming
     app.get("/api/trim", async (req, res) => {
         const { url, start, end } = req.query;
@@ -323,6 +370,9 @@ async function startServer() {
         try {
             console.log(`Trimming video: ${url} from ${startTime} to ${endTime}`);
             const clip = await createTrimmedClip(url, startTime, endTime);
+            if (!clip || !clip.filePath || !existsSync(clip.filePath)) {
+                throw new Error("Clip file was not generated properly.");
+            }
             let title = "youtube_clip";
             try {
                 const metadata = await getVideoMetadata(url);
@@ -346,7 +396,7 @@ async function startServer() {
         }
         catch (error) {
             console.error('Error processing video:', error);
-            res.status(500).json({ error: "Failed to process video. YouTube might be blocking the request." });
+            res.status(500).json({ error: error.message || "Failed to process video. YouTube might be blocking the request." });
         }
     });
     app.get("/api/download-media", async (req, res) => {
@@ -412,7 +462,8 @@ async function startServer() {
             });
         }
     });
-    app.get("/api/stream", async (req, res) => {
+    // Allow .mp4 extension for players that require it (like ReactPlayer)
+    app.get(["/api/stream", "/api/stream.mp4"], async (req, res) => {
         const { url } = req.query;
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: "URL is required" });

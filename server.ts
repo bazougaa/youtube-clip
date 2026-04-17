@@ -143,11 +143,21 @@ async function getPlayableVideoUrl(url: string) {
       throw new Error("yt-dlp did not return a playable URL");
     }
 
+    // Double check the stream URL actually works, because yt-dlp can sometimes return 403s on Windows
+    const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
+    if (!verifyResponse.ok) {
+      throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
+    }
+
     return streamUrl;
   } catch (ytDlpError) {
     console.error("yt-dlp failed:", ytDlpError);
-    throw new Error("All methods to get stream URL failed.");
   }
+
+  // If both node libraries fail, return the embedded youtube URL directly for the player
+  // This ensures the frontend doesn't crash entirely and can at least fall back to youtube embed
+  console.warn("All direct stream methods failed, falling back to standard youtube watch url");
+  return url;
 }
 
 type YtDlpFormat = {
@@ -321,7 +331,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
   ];
 
   if (ffmpegStatic) {
-    args.push("--ffmpeg-location", ffmpegStatic);
+    args.push("--ffmpeg-location", ffmpegStatic as unknown as string);
   }
 
   args.push(url);
@@ -378,7 +388,7 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   }
 
   if (ffmpegStatic) {
-    args.push("--ffmpeg-location", ffmpegStatic);
+    args.push("--ffmpeg-location", ffmpegStatic as unknown as string);
   }
 
   args.push(url);
@@ -413,6 +423,12 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
 
 async function startServer() {
   app.use(express.json());
+
+  // Add a simple request logger
+  app.use((req, res, next) => {
+    console.log(`[${req.method}] ${req.url}`);
+    next();
+  });
 
   // API Route for trimming
   app.get("/api/trim", async (req, res) => {
@@ -531,7 +547,8 @@ async function startServer() {
     }
   });
 
-  app.get("/api/stream", async (req, res) => {
+  // Allow .mp4 extension for players that require it (like ReactPlayer)
+  app.get(["/api/stream", "/api/stream.mp4"], async (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: "URL is required" });
