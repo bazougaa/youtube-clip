@@ -503,7 +503,7 @@ async function startServer() {
     const { createServer } = await import("vite");
     const vite = await createServer({
       server: { middlewareMode: true },
-      appType: "custom",
+      appType: "spa",
     });
 
     app.use(vite.middlewares);
