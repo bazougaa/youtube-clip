@@ -36,7 +36,7 @@ const mediaWorker = new Worker("media-processing", async (job) => {
   }
 }, {
   connection: redisConnection,
-  concurrency: 2, // Limits concurrent heavy processing tasks to prevent server freezing
+  concurrency: 4, // Upgraded to 4 concurrent jobs to utilize the 6 CPU cores optimally without maxing out the server
 });
 
 mediaWorker.on("failed", (job, err) => {
