@@ -245,7 +245,7 @@ async function getVideoDetails(url: string) {
   } catch (ytdlError) {
     console.warn("ytdl-core metadata lookup failed, attempting yt-dlp fallback:", ytdlError);
 
-    if (!existsSync(ytDlpPath)) {
+    if (process.platform === "win32" && !existsSync(ytDlpPath)) {
       console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
       return fallbackVideoDetails();
     }
