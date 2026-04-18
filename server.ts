@@ -7,8 +7,41 @@ import path from "path";
 import { promisify } from "util";
 import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
+import { Queue, Worker, QueueEvents } from "bullmq";
+import Redis from "ioredis";
 
 const execFileAsync = promisify(execFile);
+
+// Redis Connection for BullMQ
+const redisConnection = new Redis({
+  host: process.env.REDIS_HOST || "127.0.0.1",
+  port: Number(process.env.REDIS_PORT) || 6379,
+  maxRetriesPerRequest: null,
+});
+
+// Setup Queue to handle concurrent media processing requests
+const mediaQueue = new Queue("media-processing", { connection: redisConnection });
+const queueEvents = new QueueEvents("media-processing", { connection: redisConnection });
+
+// Setup Worker that processes the jobs
+const mediaWorker = new Worker("media-processing", async (job) => {
+  if (job.name === "trim") {
+    const { url, startTime, endTime } = job.data;
+    console.log(`[Worker] Processing trim job ${job.id} for ${url}`);
+    return await createTrimmedClip(url, startTime, endTime);
+  } else if (job.name === "download") {
+    const { url, kind, quality } = job.data;
+    console.log(`[Worker] Processing download job ${job.id} for ${url}`);
+    return await createMediaDownload(url, kind, quality);
+  }
+}, {
+  connection: redisConnection,
+  concurrency: 2, // Limits concurrent heavy processing tasks to prevent server freezing
+});
+
+mediaWorker.on("failed", (job, err) => {
+  console.error(`[Worker] Job ${job?.id} failed:`, err);
+});
 
 function runSpawn(command: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -447,8 +480,11 @@ async function startServer() {
     }
 
     try {
-      console.log(`Trimming video: ${url} from ${startTime} to ${endTime}`);
-      const clip = await createTrimmedClip(url, startTime, endTime);
+      console.log(`Queueing trim job: ${url} from ${startTime} to ${endTime}`);
+      const job = await mediaQueue.add("trim", { url, startTime, endTime });
+      
+      // Wait for the worker to finish the job
+      const clip = await job.waitUntilFinished(queueEvents);
       
       if (!clip || !clip.filePath || !existsSync(clip.filePath)) {
         throw new Error("Clip file was not generated properly.");
@@ -497,8 +533,12 @@ async function startServer() {
     }
 
     try {
-      console.log(`Downloading ${kind}: ${url} quality=${quality}`);
-      const media = await createMediaDownload(url, kind, String(quality));
+      console.log(`Queueing download job: ${kind} for ${url} quality=${quality}`);
+      const job = await mediaQueue.add("download", { url, kind, quality: String(quality) });
+      
+      // Wait for the worker to finish the job
+      const media = await job.waitUntilFinished(queueEvents);
+
       let title = "youtube_video";
       try {
         const metadata = await getVideoMetadata(url);
