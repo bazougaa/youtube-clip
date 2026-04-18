@@ -118,15 +118,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 // Resolve yt-dlp binary path
-const isWindows = os.platform() === 'win32';
-const ytDlpFilename = isWindows ? 'yt-dlp.exe' : 'yt-dlp';
+const ytDlpPath = process.platform === "win32" 
+  ? path.join(process.cwd(), "bin", "yt-dlp.exe")
+  : "/usr/local/bin/yt-dlp"; // On Linux/Vercel, we'll assume yt-dlp is available in the PATH
 
-const ytDlpPath =
-  process.env.NODE_ENV === "production" && process.env.VERCEL
-    ? path.join(process.cwd(), "bin", "yt-dlp")
-    : path.join(process.cwd(), "bin", ytDlpFilename);
-
-if (!existsSync(ytDlpPath)) {
+if (process.platform === "win32" && !existsSync(ytDlpPath)) {
   console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
 
