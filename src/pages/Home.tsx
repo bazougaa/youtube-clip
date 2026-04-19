@@ -269,7 +269,9 @@ export default function Home() {
 
     const timeout = window.setTimeout(() => {
       setPreviewRange({ start: startTime, end: endTime });
-      setEmbedUrl(`/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`);
+      // Enforce the use of the official YouTube iFrame embed for reliable previews
+      const embed = getYouTubeClipEmbedUrl(videoUrl, startTime, endTime);
+      setEmbedUrl(embed || `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`);
       setIsPlayerReady(false);
     }, 500);
 
