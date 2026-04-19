@@ -843,3 +843,48 @@ startServer();
 
 // Export for Vercel serverless
 export default app;
+
+// --- ROBUST TEMPORARY FILE CLEANUP (Cron) ---
+// Run every hour to delete orphaned temporary folders (older than 2 hours)
+function startTempFileCleanupCron() {
+  const CLEANUP_INTERVAL_MS = 1000 * 60 * 60; // 1 hour
+  const MAX_AGE_MS = 1000 * 60 * 60 * 2; // 2 hours
+
+  setInterval(async () => {
+    try {
+      const tmpDir = os.tmpdir();
+      const files = await fs.readdir(tmpDir);
+      const now = Date.now();
+
+      let cleanedCount = 0;
+
+      for (const file of files) {
+        if (file.startsWith("youtube-clip-") || file.startsWith("youtube-download-")) {
+          const fullPath = path.join(tmpDir, file);
+          try {
+            const stats = await fs.stat(fullPath);
+            if (now - stats.mtimeMs > MAX_AGE_MS) {
+              await fs.rm(fullPath, { recursive: true, force: true });
+              cleanedCount++;
+            }
+          } catch (statError) {
+            // Ignore individual file stat/rm errors (e.g. permission issues or file already deleted)
+          }
+        }
+      }
+
+      if (cleanedCount > 0) {
+        console.log(`[Cleanup Cron] Successfully removed ${cleanedCount} stale temporary directories.`);
+      }
+    } catch (err) {
+      console.error("[Cleanup Cron] Failed to read temporary directory:", err);
+    }
+  }, CLEANUP_INTERVAL_MS);
+  
+  console.log("[Cleanup Cron] Initialized. Running every 1 hour.");
+}
+
+// Only start the cron if not in a serverless environment (Vercel kills background tasks)
+if (!process.env.VERCEL) {
+  startTempFileCleanupCron();
+}
