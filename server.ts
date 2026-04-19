@@ -639,38 +639,7 @@ async function startServer() {
       console.log(`Queueing trim job: ${url} from ${startTime} to ${endTime}`);
       const job = await mediaQueue.add("trim", { url, startTime, endTime });
       
-      // Wait for the worker to finish the job
-      const clip = await job.waitUntilFinished(queueEvents);
-      
-      if (!clip || !clip.filePath || !existsSync(clip.filePath)) {
-        throw new Error("Clip file was not generated properly.");
-      }
-
-      let title = "youtube_clip";
-      try {
-        const metadata = await getVideoMetadata(url);
-        title = safeFileName(metadata.title);
-      } catch (metadataError) {
-        console.warn("Metadata lookup failed, falling back to default clip name:", metadataError);
-      }
-
-      const filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
-      
-      // Ensure we send correct disposition headers
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', 'video/mp4');
-
-      res.download(clip.filePath, filename, async (downloadError) => {
-        try {
-          await fs.rm(clip.tempDir, { recursive: true, force: true });
-        } catch (rmError) {
-          console.error("Failed to remove temp dir:", rmError);
-        }
-        if (downloadError && !res.headersSent) {
-          res.status(500).json({ error: "Failed to download clip" });
-        }
-      });
-
+      res.json({ jobId: job.id, message: "Trim job started" });
     } catch (error: any) {
       console.error('Error processing video:', error);
       res.status(500).json({ error: error.message || "Failed to process video. YouTube might be blocking the request." });
@@ -692,9 +661,66 @@ async function startServer() {
       console.log(`Queueing download job: ${kind} for ${url} quality=${quality}`);
       const job = await mediaQueue.add("download", { url, kind, quality: String(quality) });
       
-      // Wait for the worker to finish the job
-      const media = await job.waitUntilFinished(queueEvents);
+      res.json({ jobId: job.id, message: "Download job started" });
+    } catch (error) {
+      console.error('Error downloading media:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to queue download media job." });
+      }
+    }
+  });
 
+  app.get("/api/job-status/:id", async (req, res) => {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "Job ID is required" });
+    }
+
+    try {
+      const job = await mediaQueue.getJob(id);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
+      }
+
+      const state = await job.getState();
+      const progress = job.progress;
+      const failedReason = job.failedReason;
+
+      res.json({
+        id: job.id,
+        state,
+        progress,
+        failedReason,
+      });
+    } catch (error: any) {
+      console.error('Error checking job status:', error);
+      res.status(500).json({ error: "Failed to check job status" });
+    }
+  });
+
+  app.get("/api/download-file/:id", async (req, res) => {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "Job ID is required" });
+    }
+
+    try {
+      const job = await mediaQueue.getJob(id);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
+      }
+
+      const state = await job.getState();
+      if (state !== "completed") {
+        return res.status(400).json({ error: `Job is not completed yet (current state: ${state})` });
+      }
+
+      const result = job.returnvalue;
+      if (!result || !result.filePath || !existsSync(result.filePath)) {
+        return res.status(500).json({ error: "File not found or already deleted." });
+      }
+
+      const { url, startTime, endTime, kind, quality } = job.data;
       let title = "youtube_video";
       try {
         const metadata = await getVideoMetadata(url);
@@ -703,15 +729,24 @@ async function startServer() {
         console.warn("Metadata lookup failed, falling back to default media name:", metadataError);
       }
 
-      const qualityLabel = kind === "audio" ? "audio" : String(quality);
-      const filename = `${title}_${qualityLabel}.${media.extension}`;
+      let filename = "download.mp4";
+      if (job.name === "trim") {
+        filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
+        res.setHeader('Content-Type', 'video/mp4');
+      } else if (job.name === "download") {
+        const qualityLabel = kind === "audio" ? "audio" : String(quality);
+        filename = `${title}_${qualityLabel}.${result.extension || 'mp4'}`;
+        res.setHeader('Content-Type', kind === "audio" ? 'audio/m4a' : 'video/mp4');
+      }
 
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', kind === "audio" ? 'audio/m4a' : 'video/mp4');
 
-      res.download(media.filePath, filename, async (downloadError) => {
+      res.download(result.filePath, filename, async (downloadError) => {
+        // Clean up temp directory after successful download
         try {
-          await fs.rm(media.tempDir, { recursive: true, force: true });
+          if (result.tempDir) {
+            await fs.rm(result.tempDir, { recursive: true, force: true });
+          }
         } catch (rmError) {
           console.error("Failed to remove temp dir:", rmError);
         }
@@ -719,10 +754,10 @@ async function startServer() {
           res.status(500).json({ error: "Failed to download media" });
         }
       });
-    } catch (error) {
-      console.error('Error downloading media:', error);
+    } catch (error: any) {
+      console.error('Error downloading file:', error);
       if (!res.headersSent) {
-        res.status(500).json({ error: "Failed to download media." });
+        res.status(500).json({ error: "Failed to download file." });
       }
     }
   });

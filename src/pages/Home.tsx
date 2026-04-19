@@ -381,6 +381,37 @@ export default function Home() {
     setTimeout(() => setEmbedUrl(`/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`), 50);
   };
 
+  const pollJobStatus = async (jobId: string, onComplete: (jobId: string) => void) => {
+    try {
+      const interval = setInterval(async () => {
+        try {
+          const response = await fetch(`/api/job-status/${jobId}`);
+          if (!response.ok) throw new Error("Failed to check job status");
+          
+          const data = await response.json();
+          if (data.state === "completed") {
+            clearInterval(interval);
+            onComplete(jobId);
+          } else if (data.state === "failed") {
+            clearInterval(interval);
+            setError(`Job failed: ${data.failedReason || "Unknown error"}`);
+            setIsTrimming(false);
+            setActiveDownload(null);
+          }
+        } catch (err) {
+          clearInterval(interval);
+          setError("Lost connection to the server while checking job status.");
+          setIsTrimming(false);
+          setActiveDownload(null);
+        }
+      }, 2000);
+    } catch (err: any) {
+      setError(err.message || "Failed to start polling.");
+      setIsTrimming(false);
+      setActiveDownload(null);
+    }
+  };
+
   // Trimming logic
   const handleDownloadClip = async () => {
     if (!videoUrl) return;
@@ -394,53 +425,27 @@ export default function Home() {
         end: String(endTime),
       });
       
-      // First, fetch the endpoint to check if it throws an error before triggering a download
       const response = await fetch(`/api/trim?${params.toString()}`);
       if (!response.ok) {
-        let errorMessage = "Failed to download clip.";
+        let errorMessage = "Failed to start clip download.";
         try {
           const errorData = await response.json();
-          if (errorData.error) {
-            errorMessage = errorData.error;
-          }
-        } catch {
-          // ignore parse errors
-        }
+          if (errorData.error) errorMessage = errorData.error;
+        } catch {}
         throw new Error(errorMessage);
       }
 
-      // Extract filename from the Content-Disposition header if present
-      let filename = "clip.mp4";
-      const disposition = response.headers.get('Content-Disposition');
-      if (disposition && disposition.indexOf('filename=') !== -1) {
-        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-        const matches = filenameRegex.exec(disposition);
-        if (matches != null && matches[1]) { 
-          filename = matches[1].replace(/['"]/g, '');
-        }
-      }
+      const { jobId } = await response.json();
+      if (!jobId) throw new Error("Server did not return a Job ID");
 
-      // If it's OK, we can trigger the actual browser download prompt.
-      // Since we already fetched the response, we can create a blob URL to save it.
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-      
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      
-      // Clean up the object URL after a short delay
-      setTimeout(() => {
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(blobUrl);
-      }, 1000);
+      // Poll for completion
+      pollJobStatus(jobId, (completedJobId) => {
+        window.location.href = `/api/download-file/${completedJobId}`;
+        setIsTrimming(false);
+      });
       
     } catch (err: any) {
       setError(err.message || "Failed to download clip. YouTube might be blocking the request.");
-    } finally {
       setIsTrimming(false);
     }
   };
@@ -461,46 +466,25 @@ export default function Home() {
 
       const response = await fetch(`/api/download-media?${params.toString()}`);
       if (!response.ok) {
-        let errorMessage = "Failed to download media.";
+        let errorMessage = "Failed to start media download.";
         try {
           const errorData = await response.json();
-          if (errorData.error) {
-            errorMessage = errorData.error;
-          }
-        } catch {
-          // ignore parse errors
-        }
+          if (errorData.error) errorMessage = errorData.error;
+        } catch {}
         throw new Error(errorMessage);
       }
 
-      let filename = kind === "audio" ? "audio.m4a" : "video.mp4";
-      const disposition = response.headers.get('Content-Disposition');
-      if (disposition && disposition.indexOf('filename=') !== -1) {
-        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-        const matches = filenameRegex.exec(disposition);
-        if (matches != null && matches[1]) { 
-          filename = matches[1].replace(/['"]/g, '');
-        }
-      }
+      const { jobId } = await response.json();
+      if (!jobId) throw new Error("Server did not return a Job ID");
 
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-      
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      
-      setTimeout(() => {
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(blobUrl);
-      }, 1000);
+      // Poll for completion
+      pollJobStatus(jobId, (completedJobId) => {
+        window.location.href = `/api/download-file/${completedJobId}`;
+        setActiveDownload(null);
+      });
       
     } catch (err: any) {
-      setError(err.message || "Failed to download media. Try a lower quality or another video.");
-    } finally {
+      setError(err.message || "Failed to start download.");
       setActiveDownload(null);
     }
   };
