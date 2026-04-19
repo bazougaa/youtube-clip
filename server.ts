@@ -273,39 +273,56 @@ if (process.platform === "win32" && !existsSync(ytDlpPath)) {
   console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
 
+const streamUrlPromises = new Map<string, Promise<string>>();
+
 async function getPlayableVideoUrl(url: string) {
-  // Use yt-dlp as the primary and only reliable extraction engine
-  try {
-    const { stdout } = await executeYtDlpWithRetry([
-      ...getBaseYtDlpArgs(),
-      "--no-playlist",
-      "--no-warnings",
-      "--force-ipv4",
-      "-f",
-      "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
-      "--get-url",
-      url,
-    ]);
-
-    const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    if (!streamUrl) {
-      throw new Error("yt-dlp did not return a playable URL");
-    }
-
-    // Double check the stream URL actually works
-    const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
-    if (!verifyResponse.ok) {
-      throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
-    }
-
-    return streamUrl;
-  } catch (ytDlpError) {
-    console.error("yt-dlp failed to get playable video URL:", ytDlpError);
+  // Request Deduplication (Step 10)
+  if (streamUrlPromises.has(url)) {
+    console.log(`[Deduplication] Joining existing stream URL request for ${url}`);
+    return streamUrlPromises.get(url)!;
   }
 
-  // If node library fails, return the embedded youtube URL directly for the player
-  console.warn("All direct stream methods failed, falling back to standard youtube watch url");
-  return url;
+  const promise = (async () => {
+    // Use yt-dlp as the primary and only reliable extraction engine
+    try {
+      const { stdout } = await executeYtDlpWithRetry([
+        ...getBaseYtDlpArgs(),
+        "--no-playlist",
+        "--no-warnings",
+        "--force-ipv4",
+        "-f",
+        "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
+        "--get-url",
+        url,
+      ]);
+
+      const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      if (!streamUrl) {
+        throw new Error("yt-dlp did not return a playable URL");
+      }
+
+      // Double check the stream URL actually works
+      const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
+      if (!verifyResponse.ok) {
+        throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
+      }
+
+      return streamUrl;
+    } catch (ytDlpError) {
+      console.error("yt-dlp failed to get playable video URL:", ytDlpError);
+    }
+
+    // If node library fails, return the embedded youtube URL directly for the player
+    console.warn("All direct stream methods failed, falling back to standard youtube watch url");
+    return url;
+  })();
+
+  streamUrlPromises.set(url, promise);
+  try {
+    return await promise;
+  } finally {
+    streamUrlPromises.delete(url);
+  }
 }
 
 type YtDlpFormat = {
@@ -321,59 +338,76 @@ type YtDlpFormat = {
   tbr?: number;
 };
 
+const metadataPromises = new Map<string, Promise<{ title: string; duration: number; formats: YtDlpFormat[] }>>();
+
 async function getVideoDetails(url: string) {
-  // Check Redis Cache First
-  const cacheKey = `metadata:${url}`;
-  try {
-    const cached = await redisConnection.get(cacheKey);
-    if (cached) {
-      console.log(`[Cache Hit] Video metadata for ${url}`);
-      return JSON.parse(cached) as { title: string; duration: number; formats: YtDlpFormat[] };
-    }
-  } catch (redisError) {
-    console.warn("Redis cache read failed:", redisError);
+  // Request Deduplication (Step 10)
+  if (metadataPromises.has(url)) {
+    console.log(`[Deduplication] Joining existing metadata request for ${url}`);
+    return metadataPromises.get(url)!;
   }
 
-  console.log(`[Cache Miss] Fetching video metadata for ${url} via yt-dlp...`);
-
-  if (process.platform === "win32" && !existsSync(ytDlpPath)) {
-    console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
-    return fallbackVideoDetails();
-  }
-
-  try {
-    const { stdout } = await executeYtDlpWithRetry([
-      ...getBaseYtDlpArgs(),
-      "--no-playlist",
-      "--no-warnings",
-      "--force-ipv4",
-      "--socket-timeout",
-      "15",
-      "--dump-single-json",
-      url,
-    ], {
-      maxBuffer: 1024 * 1024 * 10,
-      timeout: 1000 * 45,
-    });
-
-    const parsed = JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
-    const result = {
-      title: parsed.title || "YouTube Video",
-      duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
-      formats: Array.isArray(parsed.formats) ? parsed.formats : [],
-    };
-
-    // Save to Cache (expire in 24 hours)
+  const promise = (async () => {
+    // Check Redis Cache First
+    const cacheKey = `metadata:${url}`;
     try {
-      await redisConnection.set(cacheKey, JSON.stringify(result), "EX", 60 * 60 * 24);
+      const cached = await redisConnection.get(cacheKey);
+      if (cached) {
+        console.log(`[Cache Hit] Video metadata for ${url}`);
+        return JSON.parse(cached) as { title: string; duration: number; formats: YtDlpFormat[] };
+      }
     } catch (redisError) {
-      console.warn("Redis cache write failed:", redisError);
+      console.warn("Redis cache read failed:", redisError);
     }
 
-    return result;
-  } catch (error) {
-    console.error("All metadata extractions failed, returning safe defaults:", error);
-    return fallbackVideoDetails();
+    console.log(`[Cache Miss] Fetching video metadata for ${url} via yt-dlp...`);
+
+    if (process.platform === "win32" && !existsSync(ytDlpPath)) {
+      console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
+      return fallbackVideoDetails();
+    }
+
+    try {
+      const { stdout } = await executeYtDlpWithRetry([
+        ...getBaseYtDlpArgs(),
+        "--no-playlist",
+        "--no-warnings",
+        "--force-ipv4",
+        "--socket-timeout",
+        "15",
+        "--dump-single-json",
+        url,
+      ], {
+        maxBuffer: 1024 * 1024 * 10,
+        timeout: 1000 * 45,
+      });
+
+      const parsed = JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
+      const result = {
+        title: parsed.title || "YouTube Video",
+        duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
+        formats: Array.isArray(parsed.formats) ? parsed.formats : [],
+      };
+
+      // Save to Cache (expire in 24 hours)
+      try {
+        await redisConnection.set(cacheKey, JSON.stringify(result), "EX", 60 * 60 * 24);
+      } catch (redisError) {
+        console.warn("Redis cache write failed:", redisError);
+      }
+
+      return result;
+    } catch (error) {
+      console.error("All metadata extractions failed, returning safe defaults:", error);
+      return fallbackVideoDetails();
+    }
+  })();
+
+  metadataPromises.set(url, promise);
+  try {
+    return await promise;
+  } finally {
+    metadataPromises.delete(url);
   }
 }
 
@@ -559,6 +593,30 @@ async function startServer() {
   app.use((req, res, next) => {
     console.log(`[${req.method}] ${req.url}`);
     next();
+  });
+
+  // Basic Anti-Abuse Rate Limiter (Step 15) using Redis
+  app.use("/api/", async (req, res, next) => {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown') as string;
+    const clientIp = ip.split(',')[0].trim();
+    
+    const key = `rate-limit:${clientIp}`;
+    try {
+      const current = await redisConnection.incr(key);
+      if (current === 1) {
+        await redisConnection.expire(key, 60); // 1 minute window
+      }
+      
+      // Limit to 20 API requests per minute per IP
+      if (current > 20) {
+        console.warn(`[Rate Limit] Blocked request from ${clientIp}`);
+        return res.status(429).json({ error: "Too many requests. Please try again later." });
+      }
+      next();
+    } catch (error) {
+      console.warn("Rate limiter redis error, bypassing:", error);
+      next();
+    }
   });
 
   // API Route for trimming
