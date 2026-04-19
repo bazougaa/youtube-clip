@@ -47,19 +47,24 @@ async function runSpawnWithRetry(
   timeoutMs: number
 ): Promise<void> {
   let attempt = 0;
-  const failedProxies = new Set<string>();
+  const videoUrl = baseArgs[baseArgs.length - 1];
 
   while (attempt <= MAX_RETRIES) {
-    const useProxy = attempt > 0 && proxyManager.hasProxies();
-    const proxyUrl = useProxy ? proxyManager.getProxy(failedProxies) : null;
+    const useProxy = attempt > 0 && proxyManager.hasProxy();
+    const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
     
     const args = [...baseArgs];
     if (proxyUrl) {
       args.push("--proxy", proxyUrl);
     }
 
+    if (attempt > 0) {
+      const humanDelay = 1000 + Math.random() * 2000;
+      await new Promise(r => setTimeout(r, humanDelay));
+    }
+
     try {
-      console.log(`[yt-dlp Spawn] Attempt ${attempt} (Proxy: ${proxyUrl ? 'Yes' : 'No'})`);
+      console.log(`[yt-dlp Spawn] Attempt ${attempt} (Proxy: ${useProxy ? 'Yes (Session rotated)' : 'No'})`);
       await new Promise<void>((resolve, reject) => {
         let stderrData = "";
         const child = spawn(ytDlpPath, args, { stdio: ["ignore", "ignore", "pipe"] });
@@ -92,16 +97,14 @@ async function runSpawnWithRetry(
           }
         });
       });
+      healthTracker.logSuccess(attempt, videoUrl);
       return; // Success
     } catch (error: any) {
-      console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl || 'none'}. Error: ${error.message}`);
-      
-      if (proxyUrl) {
-        failedProxies.add(proxyUrl);
-      }
+      console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
       
       attempt++;
       if (attempt > MAX_RETRIES) {
+        healthTracker.logFailure("Exhausted all retries", videoUrl);
         throw error;
       }
       
@@ -143,26 +146,59 @@ const cookiesPath = path.join(process.cwd(), "cookies.txt");
 
 // --- PROXY MANAGER & RETRY LOGIC (Step 2 & 5) ---
 class ProxyManager {
-  private proxies: string[] = [];
+  private proxyUrl: string | null = null;
 
   constructor() {
-    const envProxies = process.env.PROXY_LIST || ""; // e.g., "http://user:pass@ip:port,..."
-    if (envProxies) {
-      this.proxies = envProxies.split(",").map(p => p.trim()).filter(Boolean);
+    // Expecting something like "http://user-session-{session}:pass@gateway:port"
+    // or just "http://user:pass@gateway:port"
+    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
+  }
+
+  getProxyWithSession(): string | null {
+    if (!this.proxyUrl) return null;
+    
+    // Generate a random session ID for each request to force rotation
+    const sessionId = Math.random().toString(36).substring(2, 10);
+    
+    // If the proxy URL contains a {session} placeholder, replace it
+    if (this.proxyUrl.includes("{session}")) {
+      return this.proxyUrl.replace(/{session}/g, sessionId);
     }
+    
+    // If the provider rotates via query parameter like ?session=xyz
+    if (this.proxyUrl.includes("?session=")) {
+      return this.proxyUrl.replace(/\?session=[^&]*/, `?session=${sessionId}`);
+    }
+
+    return this.proxyUrl;
   }
 
-  getProxy(exclude: Set<string>): string | null {
-    const available = this.proxies.filter(p => !exclude.has(p));
-    if (available.length === 0) return null;
-    return available[Math.floor(Math.random() * available.length)];
-  }
-
-  hasProxies() {
-    return this.proxies.length > 0;
+  hasProxy() {
+    return !!this.proxyUrl;
   }
 }
 const proxyManager = new ProxyManager();
+
+// --- HEALTH TRACKER (Step 7) ---
+class HealthTracker {
+  private stats = {
+    success: 0,
+    failures: 0,
+    retries: 0,
+  };
+
+  logSuccess(attempt: number, videoUrl?: string) {
+    this.stats.success++;
+    if (attempt > 0) this.stats.retries += attempt;
+    console.log(`[Health Tracker] SUCCESS. Total Success: ${this.stats.success}, Failures: ${this.stats.failures}, Total Retries: ${this.stats.retries}`);
+  }
+
+  logFailure(errorMsg: string, videoUrl?: string) {
+    this.stats.failures++;
+    console.log(`[Health Tracker] FAILURE on ${videoUrl || 'unknown'}: ${errorMsg}. Total Failures: ${this.stats.failures}`);
+  }
+}
+const healthTracker = new HealthTracker();
 
 const MAX_RETRIES = 3;
 
@@ -171,41 +207,42 @@ async function executeYtDlpWithRetry(
   options: { timeout?: number, maxBuffer?: number } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   let attempt = 0;
-  const failedProxies = new Set<string>();
+  const videoUrl = args[args.length - 1];
 
   while (attempt <= MAX_RETRIES) {
-    // Attempt 0: No proxy. Attempt 1+: Use proxy.
-    const useProxy = attempt > 0 && proxyManager.hasProxies();
-    const proxyUrl = useProxy ? proxyManager.getProxy(failedProxies) : null;
-    
-    // If we need a proxy but ran out, break to let it fail or continue without?
-    // We'll just continue and it might fail again, or we can break.
+    // Attempt 0: No proxy. Attempt 1+: Use proxy with fresh session.
+    const useProxy = attempt > 0 && proxyManager.hasProxy();
+    const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
     
     const currentArgs = [...args];
     if (proxyUrl) {
       currentArgs.push("--proxy", proxyUrl);
     }
 
+    // Add 1-3s random delay before request to mimic human behavior (Step 6)
+    if (attempt > 0) {
+      const humanDelay = 1000 + Math.random() * 2000;
+      await new Promise(r => setTimeout(r, humanDelay));
+    }
+
     try {
-      console.log(`[yt-dlp] Attempt ${attempt} (Proxy: ${proxyUrl ? 'Yes' : 'No'})`);
+      console.log(`[yt-dlp] Attempt ${attempt} (Proxy: ${useProxy ? 'Yes (Session rotated)' : 'No'})`);
       const result = await execFileAsync(ytDlpPath, currentArgs, {
         maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
         timeout: options.timeout || 1000 * 45,
       });
+      healthTracker.logSuccess(attempt, videoUrl);
       return result;
     } catch (error: any) {
-      console.warn(`[yt-dlp] Attempt ${attempt} failed. Proxy: ${proxyUrl || 'none'}. Error: ${error.message}`);
-      
-      if (proxyUrl) {
-        failedProxies.add(proxyUrl);
-      }
+      console.warn(`[yt-dlp] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
       
       attempt++;
       if (attempt > MAX_RETRIES) {
+        healthTracker.logFailure("Exhausted all retries", videoUrl);
         throw error;
       }
       
-      // Backoff delay: e.g. 1s, 2s, 4s
+      // Backoff delay before the next attempt
       const backoff = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500;
       await new Promise(r => setTimeout(r, backoff));
     }
@@ -225,6 +262,7 @@ function getBaseYtDlpArgs() {
   args.push(
     "--add-header", "Accept-Language:en-US,en;q=0.9",
     "--add-header", "Sec-Fetch-Mode:navigate",
+    "--add-header", "Referer:https://www.youtube.com/",
     "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   );
   
