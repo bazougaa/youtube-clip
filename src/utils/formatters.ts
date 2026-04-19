@@ -23,26 +23,33 @@ export function formatPreciseTime(totalSeconds: number) {
 }
 
 export function parseTimeInput(value: string) {
-  const parts = value.split(":").reverse();
-  let total = 0;
+  const trimmed = value.trim();
+  if (!trimmed) return NaN;
 
-  for (let i = 0; i < parts.length; i++) {
-    const num = parseFloat(parts[i]);
-    if (!Number.isFinite(num)) continue;
-    total += num * Math.pow(60, i);
+  if (!trimmed.includes(":")) {
+    return Number(trimmed);
   }
 
-  return total;
+  const parts = trimmed.split(":").map((part) => part.trim());
+  if (parts.some((part) => part === "")) return NaN;
+
+  const numbers = parts.map(Number);
+  if (numbers.some((part) => !Number.isFinite(part))) return NaN;
+
+  return numbers.reduce((total, part) => total * 60 + part, 0);
 }
 
-export function formatBytes(bytes: number, decimals = 2) {
-  if (!Number.isFinite(bytes) || bytes === 0) return "0 Bytes";
+export function formatBytes(bytes?: number) {
+  if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return "";
 
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unitIndex = 0;
 
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
 
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
 }

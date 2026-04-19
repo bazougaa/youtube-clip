@@ -1,79 +1,122 @@
 import React from 'react';
-import { Scissors, CheckCircle2, MonitorSmartphone, Zap, ShieldCheck, Globe } from 'lucide-react';
+import { Download, Scissors, CheckCircle2, Globe, MonitorSmartphone, Zap, ShieldCheck, Video } from 'lucide-react';
 
 export function SEOSection() {
   return (
-    <div className="max-w-4xl mx-auto mt-24 text-left">
-      <div className="bg-white/5 p-8 rounded-2xl border border-white/10 backdrop-blur-sm mb-12">
-        <h2 className="text-2xl font-bold text-white mb-4">How to Clip YouTube Videos</h2>
-        <ol className="list-decimal list-inside space-y-4 text-gray-300">
-          <li><strong>Paste the URL:</strong> Find the YouTube video you want to clip and paste its URL into the search bar above.</li>
-          <li><strong>Set the Time:</strong> Use our intuitive timeline slider or manually enter the start and end times for your perfect clip.</li>
-          <li><strong>Preview:</strong> Click "Preview Clip" to ensure you've captured exactly the right moment.</li>
-          <li><strong>Download:</strong> Hit the "Download Clip" button to get your high-quality MP4 file instantly.</li>
-        </ol>
+    <section className="mt-32 max-w-6xl mx-auto px-4 border-t border-zinc-800/50 pt-24 pb-12">
+      <div className="grid md:grid-cols-3 gap-12 mb-24">
+        <div className="space-y-4">
+          <div className="w-12 h-12 bg-brand-red/10 rounded-2xl flex items-center justify-center">
+            <Download className="w-6 h-6 text-brand-red" />
+          </div>
+          <h3 className="text-xl font-bold text-white">Fast Downloads</h3>
+          <p className="text-zinc-400 leading-relaxed">
+            Download YouTube videos in MP4 format or extract MP3 audio in seconds. No registration required.
+          </p>
+        </div>
+        <div className="space-y-4">
+          <div className="w-12 h-12 bg-brand-purple/10 rounded-2xl flex items-center justify-center">
+            <Scissors className="w-6 h-6 text-brand-purple" />
+          </div>
+          <h3 className="text-xl font-bold text-white">Precise Trimming</h3>
+          <p className="text-zinc-400 leading-relaxed">
+            Cut and trim YouTube videos before downloading. Save only the parts you need, down to the millisecond.
+          </p>
+        </div>
+        <div className="space-y-4">
+          <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center">
+            <CheckCircle2 className="w-6 h-6 text-blue-500" />
+          </div>
+          <h3 className="text-xl font-bold text-white">High Quality</h3>
+          <p className="text-zinc-400 leading-relaxed">
+            Get the best possible quality available, up to 1080p and 4K when supported by the original video.
+          </p>
+        </div>
       </div>
 
-      <div className="grid md:grid-cols-3 gap-8 mb-16">
-        <div className="bg-white/5 p-6 rounded-2xl border border-white/10">
-          <MonitorSmartphone className="w-8 h-8 text-blue-400 mb-4" />
-          <h3 className="text-xl font-bold text-white mb-2">Cross-Platform</h3>
-          <p className="text-gray-400">Our YouTube clipper works flawlessly on Windows, Mac, iOS, and Android devices. No installation required.</p>
-        </div>
-        <div className="bg-white/5 p-6 rounded-2xl border border-white/10">
-          <Zap className="w-8 h-8 text-purple-400 mb-4" />
-          <h3 className="text-xl font-bold text-white mb-2">Lightning Fast</h3>
-          <p className="text-gray-400">Powered by advanced cloud rendering, your clips are generated and ready to download in seconds.</p>
-        </div>
-        <div className="bg-white/5 p-6 rounded-2xl border border-white/10">
-          <ShieldCheck className="w-8 h-8 text-green-400 mb-4" />
-          <h3 className="text-xl font-bold text-white mb-2">100% Secure</h3>
-          <p className="text-gray-400">We don't store your clips or track your downloads. Your privacy is our top priority.</p>
-        </div>
-      </div>
-
-      <div className="bg-gradient-to-r from-blue-900/20 to-purple-900/20 p-8 rounded-2xl border border-blue-500/20 mb-16">
-        <h2 className="text-2xl font-bold text-white mb-6">Why Use Our YouTube Clipper?</h2>
-        <div className="grid sm:grid-cols-2 gap-4">
-          {[
-            "Create engaging social media content (TikTok, Reels, Shorts)",
-            "Extract highlights from long podcasts or streams",
-            "Share specific gaming moments with friends",
-            "Create reaction GIFs and memes",
-            "Save educational segments for offline studying",
-            "Build compilation videos easily"
-          ].map((feature, i) => (
-            <div key={i} className="flex items-center gap-3">
-              <CheckCircle2 className="w-5 h-5 text-blue-400 flex-shrink-0" />
-              <span className="text-gray-300">{feature}</span>
+      <div className="prose prose-invert max-w-none">
+        <div className="grid md:grid-cols-2 gap-16 items-center">
+          <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-white m-0">How to Download YouTube Videos</h2>
+            <p className="text-zinc-400 text-lg leading-relaxed m-0">
+              Our free YouTube video downloader makes it incredibly easy to save your favorite content for offline viewing. Follow these simple steps:
+            </p>
+            <ol className="space-y-4 text-zinc-300 list-none p-0 m-0">
+              <li className="flex items-start gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center font-bold text-brand-red">1</span>
+                <span><strong className="text-white">Copy the URL</strong> of the YouTube video you want to download</span>
+              </li>
+              <li className="flex items-start gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center font-bold text-brand-red">2</span>
+                <span><strong className="text-white">Paste the link</strong> into the search box at the top of this page</span>
+              </li>
+              <li className="flex items-start gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center font-bold text-brand-red">3</span>
+                <span><strong className="text-white">Select your quality</strong> (MP4) or choose Audio Only (MP3)</span>
+              </li>
+              <li className="flex items-start gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center font-bold text-brand-red">4</span>
+                <span><strong className="text-white">Click Download</strong> and your file will be ready in seconds</span>
+              </li>
+            </ol>
+          </div>
+          
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-3xl p-8">
+            <h3 className="text-2xl font-bold text-white mb-6">Supported Platforms</h3>
+            <div className="space-y-4">
+              <div className="flex items-center gap-4 text-zinc-300">
+                <MonitorSmartphone className="w-6 h-6 text-zinc-500" />
+                <div>
+                  <strong className="block text-white">All Devices Supported</strong>
+                  <span className="text-sm text-zinc-500">Works on Windows, Mac, Linux, Android, and iOS</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-4 text-zinc-300">
+                <Globe className="w-6 h-6 text-zinc-500" />
+                <div>
+                  <strong className="block text-white">No Installation Required</strong>
+                  <span className="text-sm text-zinc-500">Everything runs directly in your web browser</span>
+                </div>
+              </div>
             </div>
-          ))}
+
+            <div className="mt-8 pt-8 border-t border-zinc-800">
+              <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4">Supported Browsers</h4>
+              <div className="flex flex-wrap gap-2 mt-4">
+                {['Google Chrome', 'Mozilla Firefox', 'Safari', 'Opera', 'All Chromium browsers'].map((browser, i) => (
+                  <span key={i} className="px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-zinc-300">
+                    {browser}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="space-y-8">
-        <h2 className="text-3xl font-bold text-white text-center mb-8">Frequently Asked Questions</h2>
+      {/* Final CTA Block */}
+      <div className="bg-gradient-to-br from-zinc-900 to-black border border-zinc-800 rounded-3xl p-8 md:p-12 text-center space-y-6 relative overflow-hidden mt-24">
+        <div className="absolute top-0 right-0 w-64 h-64 bg-brand-red/5 rounded-full blur-3xl -mr-32 -mt-32 pointer-events-none"></div>
+        <div className="absolute bottom-0 left-0 w-64 h-64 bg-brand-purple/5 rounded-full blur-3xl -ml-32 -mb-32 pointer-events-none"></div>
         
-        <div className="bg-white/5 p-6 rounded-xl border border-white/10">
-          <h3 className="text-lg font-bold text-white mb-2">Is this YouTube clipper really free?</h3>
-          <p className="text-gray-400">Yes! Our basic clipping and downloading service is 100% free to use. There are no hidden fees or subscriptions required to download standard quality clips.</p>
-        </div>
-
-        <div className="bg-white/5 p-6 rounded-xl border border-white/10">
-          <h3 className="text-lg font-bold text-white mb-2">Are there any watermarks on the downloaded clips?</h3>
-          <p className="text-gray-400">Absolutely not. We believe your content should be yours. Every video you clip and download is completely watermark-free.</p>
-        </div>
-
-        <div className="bg-white/5 p-6 rounded-xl border border-white/10">
-          <h3 className="text-lg font-bold text-white mb-2">What is the maximum length for a clip?</h3>
-          <p className="text-gray-400">Currently, you can create clips up to 10 minutes long. This covers 99% of use cases for social media, highlights, and memes.</p>
-        </div>
-
-        <div className="bg-white/5 p-6 rounded-xl border border-white/10">
-          <h3 className="text-lg font-bold text-white mb-2">Can I download just the audio?</h3>
-          <p className="text-gray-400">Yes! In the download options below the video player, you can select the "Audio Only" option to extract high-quality MP3/M4A audio from any YouTube video.</p>
+        <div className="relative z-10">
+          <h2 className="text-3xl font-bold text-white mb-8">Why Choose Zynclipa?</h2>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 max-w-4xl mx-auto text-sm">
+            {[
+              { icon: <Zap className="w-5 h-5 mx-auto mb-2 text-yellow-500" />, text: "Free & unlimited" },
+              { icon: <Video className="w-5 h-5 mx-auto mb-2 text-blue-500" />, text: "High-quality MP4" },
+              { icon: <Zap className="w-5 h-5 mx-auto mb-2 text-brand-red" />, text: "Fast performance" },
+              { icon: <MonitorSmartphone className="w-5 h-5 mx-auto mb-2 text-purple-500" />, text: "All devices" },
+              { icon: <ShieldCheck className="w-5 h-5 mx-auto mb-2 text-green-500" />, text: "No sign-up" }
+            ].map((feature, i) => (
+              <div key={i} className="flex flex-col items-center justify-center p-4 bg-black/50 border border-zinc-800/50 rounded-xl hover:border-zinc-700 transition-colors">
+                {feature.icon}
+                <span className="text-zinc-300 font-medium">{feature.text}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

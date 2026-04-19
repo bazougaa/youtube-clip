@@ -3,49 +3,57 @@ import { Loader2 } from 'lucide-react';
 
 interface VideoPlayerProps {
   isPlayerReady: boolean;
-  setIsPlayerReady: (ready: boolean) => void;
+  thumbnailUrl: string | null;
   embedUrl: string | null;
-  previewRange: { start: number; end: number } | null;
-  setError: (error: string) => void;
+  previewRange: { start: number; end: number };
+  setIsPlayerReady: (ready: boolean) => void;
 }
 
 export function VideoPlayer({ 
   isPlayerReady, 
-  setIsPlayerReady, 
+  thumbnailUrl, 
   embedUrl, 
   previewRange, 
-  setError 
+  setIsPlayerReady 
 }: VideoPlayerProps) {
   return (
-    <div className="relative aspect-video w-full rounded-2xl overflow-hidden bg-gray-900 border border-white/10 shadow-2xl mb-12">
-      {!isPlayerReady && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-900 z-10">
-          <Loader2 className="w-10 h-10 animate-spin text-blue-500" />
+    <div className="relative aspect-video rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl">
+      {!isPlayerReady && thumbnailUrl && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-zinc-900">
+          <img 
+            src={thumbnailUrl} 
+            alt="Video thumbnail" 
+            className="absolute inset-0 w-full h-full object-cover opacity-50 blur-sm"
+          />
+          <Loader2 className="w-8 h-8 text-brand-red animate-spin relative z-20" />
         </div>
       )}
+      
       {embedUrl ? (
-        previewRange ? (
-          <video 
-            src={embedUrl}
-            className="w-full h-full object-contain bg-black"
+        embedUrl.includes("/api/stream.mp4") ? (
+          <video
+            src={`${embedUrl}&t=${previewRange.start},${previewRange.end}`}
+            className="w-full h-full"
             controls
             autoPlay
-            onCanPlay={() => setIsPlayerReady(true)}
-            onError={() => {
-              setError("Failed to load video stream. YouTube may have blocked the request. Try again later or use full download.");
-              setIsPlayerReady(true);
-            }}
+            onLoadedData={() => setIsPlayerReady(true)}
+            onError={() => setIsPlayerReady(true)}
           />
         ) : (
           <iframe
             src={embedUrl}
-            className="absolute inset-0 w-full h-full"
+            title="YouTube video player"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
+            className="w-full h-full border-0"
             onLoad={() => setIsPlayerReady(true)}
           />
         )
-      ) : null}
+      ) : (
+        <div className="absolute inset-0 flex items-center justify-center bg-zinc-900">
+          <p className="text-zinc-500">Preview not available</p>
+        </div>
+      )}
     </div>
   );
 }
