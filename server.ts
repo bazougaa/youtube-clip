@@ -5,14 +5,13 @@ import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { promisify } from "util";
-import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
 import { Queue, Worker, QueueEvents } from "bullmq";
 import Redis from "ioredis";
 
 const execFileAsync = promisify(execFile);
 
-// Redis Connection for BullMQ
+// Redis Connection for BullMQ & Caching
 const redisConnection = new Redis({
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT) || 6379,
@@ -43,41 +42,74 @@ mediaWorker.on("failed", (job, err) => {
   console.error(`[Worker] Job ${job?.id} failed:`, err);
 });
 
-function runSpawn(command: string, args: string[], timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let stderrData = "";
-    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+async function runSpawnWithRetry(
+  baseArgs: string[],
+  timeoutMs: number
+): Promise<void> {
+  let attempt = 0;
+  const failedProxies = new Set<string>();
+
+  while (attempt <= MAX_RETRIES) {
+    const useProxy = attempt > 0 && proxyManager.hasProxies();
+    const proxyUrl = useProxy ? proxyManager.getProxy(failedProxies) : null;
     
-    if (child.stderr) {
-      child.stderr.on("data", (data) => {
-        stderrData += data.toString();
-        // keep stderr bounded to avoid memory issues
-        if (stderrData.length > 50000) {
-          stderrData = stderrData.slice(-50000);
-        }
-      });
+    const args = [...baseArgs];
+    if (proxyUrl) {
+      args.push("--proxy", proxyUrl);
     }
 
-    const timeoutId = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("Process timed out"));
-    }, timeoutMs);
+    try {
+      console.log(`[yt-dlp Spawn] Attempt ${attempt} (Proxy: ${proxyUrl ? 'Yes' : 'No'})`);
+      await new Promise<void>((resolve, reject) => {
+        let stderrData = "";
+        const child = spawn(ytDlpPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+        
+        if (child.stderr) {
+          child.stderr.on("data", (data) => {
+            stderrData += data.toString();
+            if (stderrData.length > 50000) {
+              stderrData = stderrData.slice(-50000);
+            }
+          });
+        }
 
-    child.on("error", (err) => {
-      clearTimeout(timeoutId);
-      reject(err);
-    });
+        const timeoutId = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error("Process timed out"));
+        }, timeoutMs);
 
-    child.on("close", (code) => {
-      clearTimeout(timeoutId);
-      if (code === 0) {
-        resolve();
-      } else {
-        console.error(`yt-dlp exited with code ${code}\nStderr: ${stderrData}`);
-        reject(new Error(`Process exited with code ${code}: ${stderrData}`));
+        child.on("error", (err) => {
+          clearTimeout(timeoutId);
+          reject(err);
+        });
+
+        child.on("close", (code) => {
+          clearTimeout(timeoutId);
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`Process exited with code ${code}: ${stderrData}`));
+          }
+        });
+      });
+      return; // Success
+    } catch (error: any) {
+      console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl || 'none'}. Error: ${error.message}`);
+      
+      if (proxyUrl) {
+        failedProxies.add(proxyUrl);
       }
-    });
-  });
+      
+      attempt++;
+      if (attempt > MAX_RETRIES) {
+        throw error;
+      }
+      
+      const backoff = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500;
+      await new Promise(r => setTimeout(r, backoff));
+    }
+  }
+  throw new Error("yt-dlp spawn failed after all retries");
 }
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -102,21 +134,6 @@ function fallbackVideoDetails() {
   };
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
-  return new Promise<T>((resolve, reject) => {
-    const timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise
-      .then((value) => {
-        clearTimeout(timeoutId);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timeoutId);
-        reject(error);
-      });
-  });
-}
-
 // Resolve yt-dlp binary path
 const ytDlpPath = process.platform === "win32" 
   ? path.join(process.cwd(), "bin", "yt-dlp.exe")
@@ -124,11 +141,93 @@ const ytDlpPath = process.platform === "win32"
 
 const cookiesPath = path.join(process.cwd(), "cookies.txt");
 
+// --- PROXY MANAGER & RETRY LOGIC (Step 2 & 5) ---
+class ProxyManager {
+  private proxies: string[] = [];
+
+  constructor() {
+    const envProxies = process.env.PROXY_LIST || ""; // e.g., "http://user:pass@ip:port,..."
+    if (envProxies) {
+      this.proxies = envProxies.split(",").map(p => p.trim()).filter(Boolean);
+    }
+  }
+
+  getProxy(exclude: Set<string>): string | null {
+    const available = this.proxies.filter(p => !exclude.has(p));
+    if (available.length === 0) return null;
+    return available[Math.floor(Math.random() * available.length)];
+  }
+
+  hasProxies() {
+    return this.proxies.length > 0;
+  }
+}
+const proxyManager = new ProxyManager();
+
+const MAX_RETRIES = 3;
+
+async function executeYtDlpWithRetry(
+  args: string[],
+  options: { timeout?: number, maxBuffer?: number } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  let attempt = 0;
+  const failedProxies = new Set<string>();
+
+  while (attempt <= MAX_RETRIES) {
+    // Attempt 0: No proxy. Attempt 1+: Use proxy.
+    const useProxy = attempt > 0 && proxyManager.hasProxies();
+    const proxyUrl = useProxy ? proxyManager.getProxy(failedProxies) : null;
+    
+    // If we need a proxy but ran out, break to let it fail or continue without?
+    // We'll just continue and it might fail again, or we can break.
+    
+    const currentArgs = [...args];
+    if (proxyUrl) {
+      currentArgs.push("--proxy", proxyUrl);
+    }
+
+    try {
+      console.log(`[yt-dlp] Attempt ${attempt} (Proxy: ${proxyUrl ? 'Yes' : 'No'})`);
+      const result = await execFileAsync(ytDlpPath, currentArgs, {
+        maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
+        timeout: options.timeout || 1000 * 45,
+      });
+      return result;
+    } catch (error: any) {
+      console.warn(`[yt-dlp] Attempt ${attempt} failed. Proxy: ${proxyUrl || 'none'}. Error: ${error.message}`);
+      
+      if (proxyUrl) {
+        failedProxies.add(proxyUrl);
+      }
+      
+      attempt++;
+      if (attempt > MAX_RETRIES) {
+        throw error;
+      }
+      
+      // Backoff delay: e.g. 1s, 2s, 4s
+      const backoff = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500;
+      await new Promise(r => setTimeout(r, backoff));
+    }
+  }
+  throw new Error("yt-dlp failed after all retries");
+}
+
 function getBaseYtDlpArgs() {
   const args: string[] = [];
   if (existsSync(cookiesPath)) {
     args.push("--cookies", cookiesPath);
   }
+  
+  // Headers + Cookies simulation (Step 4)
+  // yt-dlp automatically extracts cookies from browsers or uses the --cookies file.
+  // We can add realistic headers to avoid blocks.
+  args.push(
+    "--add-header", "Accept-Language:en-US,en;q=0.9",
+    "--add-header", "Sec-Fetch-Mode:navigate",
+    "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  );
+  
   return args;
 }
 
@@ -137,37 +236,9 @@ if (process.platform === "win32" && !existsSync(ytDlpPath)) {
 }
 
 async function getPlayableVideoUrl(url: string) {
+  // Use yt-dlp as the primary and only reliable extraction engine
   try {
-    // Attempt to use ytdl-core first for Vercel compatibility
-    const info = await ytdl.getInfo(url);
-    
-    // Check if decipher failed based on number of formats
-    if (info.formats && info.formats.length >= 5) {
-      // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
-      // So we use a custom filter to ensure we get a combined mp4 stream if possible.
-      const format = ytdl.chooseFormat(info.formats, { 
-        filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio 
-      }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-      
-      if (format && format.url) {
-        // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
-        const response = await fetch(format.url, { method: 'HEAD' });
-        if (response.ok) {
-          return format.url;
-        } else {
-          console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
-        }
-      }
-    } else {
-      console.warn("ytdl-core returned too few formats, skipping to yt-dlp stream URL lookup.");
-    }
-  } catch (ytdlError) {
-    console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
-  }
-
-  // Fallback to yt-dlp if available
-  try {
-    const { stdout } = await execFileAsync(ytDlpPath, [
+    const { stdout } = await executeYtDlpWithRetry([
       ...getBaseYtDlpArgs(),
       "--no-playlist",
       "--no-warnings",
@@ -183,7 +254,7 @@ async function getPlayableVideoUrl(url: string) {
       throw new Error("yt-dlp did not return a playable URL");
     }
 
-    // Double check the stream URL actually works, because yt-dlp can sometimes return 403s on Windows
+    // Double check the stream URL actually works
     const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
     if (!verifyResponse.ok) {
       throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
@@ -191,11 +262,10 @@ async function getPlayableVideoUrl(url: string) {
 
     return streamUrl;
   } catch (ytDlpError) {
-    console.error("yt-dlp failed:", ytDlpError);
+    console.error("yt-dlp failed to get playable video URL:", ytDlpError);
   }
 
-  // If both node libraries fail, return the embedded youtube URL directly for the player
-  // This ensures the frontend doesn't crash entirely and can at least fall back to youtube embed
+  // If node library fails, return the embedded youtube URL directly for the player
   console.warn("All direct stream methods failed, falling back to standard youtube watch url");
   return url;
 }
@@ -214,78 +284,58 @@ type YtDlpFormat = {
 };
 
 async function getVideoDetails(url: string) {
+  // Check Redis Cache First
+  const cacheKey = `metadata:${url}`;
   try {
-    // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
-    // Add a hard timeout so serverless requests fail fast into fallback metadata.
-    const info = await withTimeout(
-      ytdl.getInfo(url, {
-        requestOptions: {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-          },
-        },
-      }),
-      METADATA_TIMEOUT_MS,
-      "ytdl-core metadata lookup timed out",
-    );
-
-    const formatList = Array.isArray((info as { formats?: unknown }).formats) ? info.formats : [];
-    const formats: YtDlpFormat[] = formatList.map((f) => ({
-      format_id: String(f.itag),
-      ext: f.container,
-      height: f.height,
-      width: f.width,
-      fps: f.fps,
-      vcodec: f.hasVideo ? f.videoCodec : "none",
-      acodec: f.hasAudio ? f.audioCodec : "none",
-      filesize: Number(f.contentLength) || undefined,
-    }));
-
-    // If ytdl-core decipher failed, it often returns very few or 0 formats.
-    // Force yt-dlp fallback if we don't get a good list of qualities.
-    if (formats.length < 5) {
-      throw new Error("ytdl-core returned too few formats, likely due to decipher failure.");
+    const cached = await redisConnection.get(cacheKey);
+    if (cached) {
+      console.log(`[Cache Hit] Video metadata for ${url}`);
+      return JSON.parse(cached) as { title: string; duration: number; formats: YtDlpFormat[] };
     }
+  } catch (redisError) {
+    console.warn("Redis cache read failed:", redisError);
+  }
 
-    return {
-      title: info.videoDetails.title,
-      duration: Number(info.videoDetails.lengthSeconds),
-      formats,
+  console.log(`[Cache Miss] Fetching video metadata for ${url} via yt-dlp...`);
+
+  if (process.platform === "win32" && !existsSync(ytDlpPath)) {
+    console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
+    return fallbackVideoDetails();
+  }
+
+  try {
+    const { stdout } = await executeYtDlpWithRetry([
+      ...getBaseYtDlpArgs(),
+      "--no-playlist",
+      "--no-warnings",
+      "--force-ipv4",
+      "--socket-timeout",
+      "15",
+      "--dump-single-json",
+      url,
+    ], {
+      maxBuffer: 1024 * 1024 * 10,
+      timeout: 1000 * 45,
+    });
+
+    const parsed = JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
+    const result = {
+      title: parsed.title || "YouTube Video",
+      duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
+      formats: Array.isArray(parsed.formats) ? parsed.formats : [],
     };
-  } catch (ytdlError) {
-    console.warn("ytdl-core metadata lookup failed, attempting yt-dlp fallback:", ytdlError);
 
-    if (process.platform === "win32" && !existsSync(ytDlpPath)) {
-      console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
-      return fallbackVideoDetails();
-    }
-
+    // Save to Cache (expire in 24 hours)
     try {
-      const { stdout } = await execFileAsync(ytDlpPath, [
-        ...getBaseYtDlpArgs(),
-        "--no-playlist",
-        "--no-warnings",
-        "--force-ipv4",
-        "--socket-timeout",
-        "15",
-        "--dump-single-json",
-        url,
-      ], {
-        maxBuffer: 1024 * 1024 * 10,
-        timeout: 1000 * 45,
-      });
-
-      const parsed = JSON.parse(stdout) as { title?: string; duration?: number; formats?: YtDlpFormat[] };
-      return {
-        title: parsed.title || "YouTube Video",
-        duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
-        formats: Array.isArray(parsed.formats) ? parsed.formats : [],
-      };
-    } catch (fallbackError) {
-      console.error("All metadata fallbacks failed, returning safe defaults:", fallbackError);
-      return fallbackVideoDetails();
+      await redisConnection.set(cacheKey, JSON.stringify(result), "EX", 60 * 60 * 24);
+    } catch (redisError) {
+      console.warn("Redis cache write failed:", redisError);
     }
+
+    return result;
+  } catch (error) {
+    console.error("All metadata extractions failed, returning safe defaults:", error);
+    return fallbackVideoDetails();
   }
 }
 
@@ -380,7 +430,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
 
   try {
     console.log("Running yt-dlp to trim video:", ytDlpPath, args);
-    await runSpawn(ytDlpPath, args, 1000 * 60 * 10); // 10 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 10); // 10 minute timeout
 
     const files = await fs.readdir(tempDir);
     const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
@@ -437,7 +487,7 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   args.push(url);
 
   try {
-    await runSpawn(ytDlpPath, args, 1000 * 60 * 30); // 30 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 30); // 30 minute timeout
 
     const files = await fs.readdir(tempDir);
     const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
