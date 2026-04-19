@@ -122,6 +122,16 @@ const ytDlpPath = process.platform === "win32"
   ? path.join(process.cwd(), "bin", "yt-dlp.exe")
   : "/usr/local/bin/yt-dlp"; // On Linux/Vercel, we'll assume yt-dlp is available in the PATH
 
+const cookiesPath = path.join(process.cwd(), "cookies.txt");
+
+function getBaseYtDlpArgs() {
+  const args: string[] = [];
+  if (existsSync(cookiesPath)) {
+    args.push("--cookies", cookiesPath);
+  }
+  return args;
+}
+
 if (process.platform === "win32" && !existsSync(ytDlpPath)) {
   console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
@@ -158,6 +168,7 @@ async function getPlayableVideoUrl(url: string) {
   // Fallback to yt-dlp if available
   try {
     const { stdout } = await execFileAsync(ytDlpPath, [
+      ...getBaseYtDlpArgs(),
       "--no-playlist",
       "--no-warnings",
       "--force-ipv4",
@@ -252,6 +263,7 @@ async function getVideoDetails(url: string) {
 
     try {
       const { stdout } = await execFileAsync(ytDlpPath, [
+        ...getBaseYtDlpArgs(),
         "--no-playlist",
         "--no-warnings",
         "--force-ipv4",
@@ -344,6 +356,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "youtube-clip-"));
   const outputTemplate = path.join(tempDir, "clip.%(ext)s");
   const args = [
+    ...getBaseYtDlpArgs(),
     "--no-playlist",
     "--no-warnings",
     "--no-progress",
@@ -402,6 +415,7 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "youtube-download-"));
   const outputTemplate = path.join(tempDir, "download.%(ext)s");
   const args = [
+    ...getBaseYtDlpArgs(),
     "--no-playlist",
     "--no-warnings",
     "--no-progress",
