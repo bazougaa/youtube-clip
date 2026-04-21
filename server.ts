@@ -1,13 +1,16 @@
+import "dotenv/config";
 import express from "express";
 import { execFile, spawn } from "child_process";
+import { randomBytes } from "crypto";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { promisify } from "util";
 import ffmpegStatic from "ffmpeg-static";
-import { Queue, Worker, QueueEvents } from "bullmq";
-import Redis from "ioredis";
+import { Queue, Worker } from "bullmq";
+import { Redis } from "ioredis";
+import { LocalProxy } from "./src/utils/local-proxy";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,7 +23,6 @@ const redisConnection = new Redis({
 
 // Setup Queue to handle concurrent media processing requests
 const mediaQueue = new Queue("media-processing", { connection: redisConnection });
-const queueEvents = new QueueEvents("media-processing", { connection: redisConnection });
 
 // Setup Worker that processes the jobs
 const mediaWorker = new Worker("media-processing", async (job) => {
@@ -42,11 +44,10 @@ mediaWorker.on("failed", (job, err) => {
   console.error(`[Worker] Job ${job?.id} failed:`, err);
 });
 
-import { LocalProxy } from "./src/utils/local-proxy.js";
-
 async function runSpawnWithRetry(
   baseArgs: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  verifyResult?: () => Promise<void>
 ): Promise<void> {
   let attempt = 0;
   const videoUrl = baseArgs[baseArgs.length - 1];
@@ -54,23 +55,29 @@ async function runSpawnWithRetry(
   while (attempt <= MAX_RETRIES) {
     const useProxy = attempt > 0 && proxyManager.hasProxy();
     const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
-    
+
     let localProxy: LocalProxy | null = null;
     let localProxyPort = 0;
 
     const args = [...baseArgs];
     if (proxyUrl) {
+      args.push("--proxy", proxyUrl);
+      
       try {
         const u = new URL(proxyUrl);
-        localProxy = new LocalProxy(u.hostname, parseInt(u.port || '1080'), decodeURIComponent(u.username), decodeURIComponent(u.password));
-        localProxyPort = await localProxy.start();
-
-        args.push("--proxy", `socks5://${u.username}:${u.password}@${u.hostname}:${u.port}`);
-        // We must explicitly tell ffmpeg to use the local HTTP proxy, because ffmpeg does not support SOCKS5.
-        // The local proxy will forward the HTTP request to the SOCKS5 proxy-jet server.
-        args.push("--downloader-args", `ffmpeg:-http_proxy http://127.0.0.1:${localProxyPort}`);
+        if (u.protocol.startsWith('socks5')) {
+          const username = decodeURIComponent(u.username || '');
+          const password = decodeURIComponent(u.password || '');
+          const port = parseInt(u.port || '1080');
+          
+          localProxy = new LocalProxy(u.hostname, port, username, password);
+          localProxyPort = await localProxy.start();
+          args.push("--downloader-args", `ffmpeg:-http_proxy http://127.0.0.1:${localProxyPort}`);
+        } else {
+          args.push("--downloader-args", `ffmpeg:-http_proxy ${proxyUrl}`);
+        }
       } catch (err) {
-        console.error("Failed to start local proxy", err);
+        console.error("[Local Proxy] Failed to start local proxy bridge:", err);
       }
     }
 
@@ -106,7 +113,6 @@ async function runSpawnWithRetry(
 
         child.on("close", (code) => {
           clearTimeout(timeoutId);
-          if (localProxy) localProxy.stop().catch(console.error);
           if (code === 0) {
             resolve();
           } else {
@@ -114,11 +120,19 @@ async function runSpawnWithRetry(
           }
         });
       });
+      if (verifyResult) {
+        await verifyResult();
+      }
       healthTracker.logSuccess(attempt, videoUrl);
+      if (localProxy) {
+        await localProxy.stop();
+      }
       return; // Success
     } catch (error: any) {
-      if (localProxy) localProxy.stop().catch(console.error);
       console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
+      if (localProxy) {
+        await localProxy.stop().catch(() => {});
+      }
       
       attempt++;
       if (attempt > MAX_RETRIES) {
@@ -141,11 +155,23 @@ process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
 });
 
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-
 const FALLBACK_DURATION_SECONDS = 600;
-const METADATA_TIMEOUT_MS = 12000;
+const YOUTUBE_HOSTS = new Set([
+  "youtu.be",
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+]);
+
+type MediaJobData = {
+  url: string;
+  accessToken: string;
+  startTime?: number;
+  endTime?: number;
+  kind?: "video" | "audio";
+  quality?: string;
+};
 
 function fallbackVideoDetails() {
   return {
@@ -167,11 +193,7 @@ class ProxyManager {
   private proxyUrl: string | null = null;
 
   constructor() {
-    // The rotating SOCKS5 proxy from proxy-jet.io
-    // Using -session-{session} in the username to force IP rotation on every retry
-    const defaultProxy = "socks5://260421fYsD1-resi-US-session-{session}:9AAzjCS2c54jxjz@ca.proxy-jet.io:2020";
-    
-    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || defaultProxy;
+    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
   }
 
   getProxyWithSession(): string | null {
@@ -198,6 +220,44 @@ class ProxyManager {
   }
 }
 const proxyManager = new ProxyManager();
+
+function normalizeYouTubeUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const host = parsed.hostname.toLowerCase();
+
+    if (!YOUTUBE_HOSTS.has(host)) {
+      return null;
+    }
+
+    if (host === "youtu.be") {
+      const id = parsed.pathname.split("/").filter(Boolean)[0];
+      return id ? `https://www.youtube.com/watch?v=${id}` : null;
+    }
+
+    if (parsed.pathname.startsWith("/shorts/") || parsed.pathname.startsWith("/embed/")) {
+      const id = parsed.pathname.split("/").filter(Boolean)[1];
+      return id ? `https://www.youtube.com/watch?v=${id}` : null;
+    }
+
+    const videoId = parsed.searchParams.get("v");
+    if (!videoId) {
+      return null;
+    }
+
+    return `https://www.youtube.com/watch?v=${videoId}`;
+  } catch {
+    return null;
+  }
+}
+
+function createAccessToken() {
+  return randomBytes(24).toString("hex");
+}
+
+function getRequestToken(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
 
 // --- HEALTH TRACKER (Step 7) ---
 class HealthTracker {
@@ -524,14 +584,23 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
 
   try {
     console.log("Running yt-dlp to trim video:", ytDlpPath, args);
-    await runSpawnWithRetry(args, 1000 * 60 * 10); // 10 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 10, async () => {
+      const files = await fs.readdir(tempDir);
+      const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
+      if (!clipFile) {
+        throw new Error("yt-dlp did not create a clip file");
+      }
+      const finalPath = path.join(tempDir, clipFile);
+      const stats = await fs.stat(finalPath);
+      if (stats.size < 1024) {
+        // Delete the bad file so the next retry can start fresh
+        await fs.rm(finalPath, { force: true });
+        throw new Error("Downloaded clip file is suspiciously small (possible proxy or block issue). Retrying...");
+      }
+    }); // 10 minute timeout
 
     const files = await fs.readdir(tempDir);
     const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
-    if (!clipFile) {
-      throw new Error("yt-dlp did not create a clip file");
-    }
-
     const finalPath = path.join(tempDir, clipFile);
 
     return {
@@ -585,13 +654,22 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   args.push(url);
 
   try {
-    await runSpawnWithRetry(args, 1000 * 60 * 30); // 30 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 30, async () => {
+      const files = await fs.readdir(tempDir);
+      const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
+      if (!mediaFile) {
+        throw new Error("yt-dlp did not create a media file");
+      }
+      const finalPath = path.join(tempDir, mediaFile);
+      const stats = await fs.stat(finalPath);
+      if (stats.size < 1024) {
+        await fs.rm(finalPath, { force: true });
+        throw new Error("Downloaded media file is suspiciously small. Retrying...");
+      }
+    }); // 30 minute timeout
 
     const files = await fs.readdir(tempDir);
     const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
-    if (!mediaFile) {
-      throw new Error("yt-dlp did not create a media file");
-    }
     
     return {
       filePath: path.join(tempDir, mediaFile),
@@ -653,6 +731,11 @@ async function startServer() {
       return res.status(400).json({ error: "URL is required" });
     }
 
+    const normalizedUrl = normalizeYouTubeUrl(url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+    }
+
     const startTime = parseFloat(start as string) || 0;
     const endTime = parseFloat(end as string) || 10;
     const duration = endTime - startTime;
@@ -662,10 +745,11 @@ async function startServer() {
     }
 
     try {
-      console.log(`Queueing trim job: ${url} from ${startTime} to ${endTime}`);
-      const job = await mediaQueue.add("trim", { url, startTime, endTime });
+      const accessToken = createAccessToken();
+      console.log(`Queueing trim job: ${normalizedUrl} from ${startTime} to ${endTime}`);
+      const job = await mediaQueue.add("trim", { url: normalizedUrl, startTime, endTime, accessToken });
       
-      res.json({ jobId: job.id, message: "Trim job started" });
+      res.json({ jobId: job.id, token: accessToken, message: "Trim job started" });
     } catch (error: any) {
       console.error('Error processing video:', error);
       res.status(500).json({ error: error.message || "Failed to process video. YouTube might be blocking the request." });
@@ -679,15 +763,26 @@ async function startServer() {
       return res.status(400).json({ error: "URL is required" });
     }
 
+    const normalizedUrl = normalizeYouTubeUrl(url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+    }
+
     if (kind !== "video" && kind !== "audio") {
       return res.status(400).json({ error: "Download kind must be video or audio" });
     }
 
     try {
-      console.log(`Queueing download job: ${kind} for ${url} quality=${quality}`);
-      const job = await mediaQueue.add("download", { url, kind, quality: String(quality) });
+      const accessToken = createAccessToken();
+      console.log(`Queueing download job: ${kind} for ${normalizedUrl} quality=${quality}`);
+      const job = await mediaQueue.add("download", {
+        url: normalizedUrl,
+        kind,
+        quality: String(quality),
+        accessToken,
+      });
       
-      res.json({ jobId: job.id, message: "Download job started" });
+      res.json({ jobId: job.id, token: accessToken, message: "Download job started" });
     } catch (error) {
       console.error('Error downloading media:', error);
       if (!res.headersSent) {
@@ -698,14 +793,24 @@ async function startServer() {
 
   app.get("/api/job-status/:id", async (req, res) => {
     const { id } = req.params;
+    const token = getRequestToken(req.query.token);
     if (!id) {
       return res.status(400).json({ error: "Job ID is required" });
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: "Download token is required" });
     }
 
     try {
       const job = await mediaQueue.getJob(id);
       if (!job) {
         return res.status(404).json({ error: "Job not found" });
+      }
+
+      const jobData = job.data as MediaJobData;
+      if (jobData.accessToken !== token) {
+        return res.status(403).json({ error: "Invalid download token" });
       }
 
       const state = await job.getState();
@@ -726,14 +831,24 @@ async function startServer() {
 
   app.get("/api/download-file/:id", async (req, res) => {
     const { id } = req.params;
+    const token = getRequestToken(req.query.token);
     if (!id) {
       return res.status(400).json({ error: "Job ID is required" });
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: "Download token is required" });
     }
 
     try {
       const job = await mediaQueue.getJob(id);
       if (!job) {
         return res.status(404).json({ error: "Job not found" });
+      }
+
+      const jobData = job.data as MediaJobData;
+      if (jobData.accessToken !== token) {
+        return res.status(403).json({ error: "Invalid download token" });
       }
 
       const state = await job.getState();
@@ -746,7 +861,7 @@ async function startServer() {
         return res.status(500).json({ error: "File not found or already deleted." });
       }
 
-      const { url, startTime, endTime, kind, quality } = job.data;
+      const { url, startTime, endTime, kind, quality } = jobData;
       let title = "youtube_video";
       try {
         const metadata = await getVideoMetadata(url);
@@ -762,7 +877,7 @@ async function startServer() {
       } else if (job.name === "download") {
         const qualityLabel = kind === "audio" ? "audio" : String(quality);
         filename = `${title}_${qualityLabel}.${result.extension || 'mp4'}`;
-        res.setHeader('Content-Type', kind === "audio" ? 'audio/m4a' : 'video/mp4');
+        res.setHeader('Content-Type', kind === "audio" ? 'audio/mpeg' : 'video/mp4');
       }
 
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -798,8 +913,13 @@ async function startServer() {
       return res.status(400).json({ error: "URL is required" });
     }
 
+    const normalizedUrl = normalizeYouTubeUrl(url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+    }
+
     try {
-      const info = await getVideoMetadata(url);
+      const info = await getVideoMetadata(normalizedUrl);
       res.json(info);
     } catch (error) {
       console.error('Error reading video info:', error);
@@ -820,8 +940,13 @@ async function startServer() {
       return res.status(400).json({ error: "URL is required" });
     }
 
+    const normalizedUrl = normalizeYouTubeUrl(url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+    }
+
     try {
-      const streamUrl = await getPlayableVideoUrl(url);
+      const streamUrl = await getPlayableVideoUrl(normalizedUrl);
       res.redirect(302, streamUrl);
     } catch (error) {
       console.error('Error streaming video:', error);
