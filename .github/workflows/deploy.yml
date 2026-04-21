@@ -1,0 +1,33 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: executing remote ssh commands to deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: 77.237.238.195
+          username: root
+          password: 7548693120.aA
+          port: 22
+          script: |
+            cd /opt/youtube-clip
+            
+            # Pull latest changes
+            git fetch origin main
+            git reset --hard origin/main
+            
+            # Install dependencies and build
+            npm install
+            npm run build
+            npx tsc server.ts --target ESNext --module NodeNext --moduleResolution NodeNext --esModuleInterop
+            
+            # Restart the service
+            pm2 restart youtube-clip
+            pm2 save

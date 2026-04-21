@@ -149,9 +149,11 @@ class ProxyManager {
   private proxyUrl: string | null = null;
 
   constructor() {
-    // Expecting something like "http://user-session-{session}:pass@gateway:port"
-    // or just "http://user:pass@gateway:port"
-    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
+    // The rotating SOCKS5 proxy from proxy-jet.io
+    // Using -session-{session} in the username to force IP rotation on every retry
+    const defaultProxy = "socks5://260421fYsD1-resi-US-session-{session}:9AAzjCS2c54jxjz@ca.proxy-jet.io:2020";
+    
+    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || defaultProxy;
   }
 
   getProxyWithSession(): string | null {

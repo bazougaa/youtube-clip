@@ -7,7 +7,11 @@ console.log("Connecting to update server...");
 conn.on('ready', () => {
   conn.exec(`
     cd /opt/youtube-clip
-    git pull
+    git fetch origin main
+    git reset --hard origin/main
+    npm install
+    npm run build
+    npx tsc server.ts
     pm2 restart youtube-clip
   `, (err, stream) => {
     if (err) throw err;
