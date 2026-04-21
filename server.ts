@@ -573,7 +573,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
     outputTemplate,
   ];
 
-  if (ffmpegStatic) {
+  if (ffmpegStatic && os.platform() !== 'linux') {
     args.push("--ffmpeg-location", ffmpegStatic as unknown as string);
   }
 
@@ -644,7 +644,7 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
     args.push("-f", getVideoFormatSelector(quality), "--merge-output-format", "mp4");
   }
 
-  if (ffmpegStatic) {
+  if (ffmpegStatic && os.platform() !== 'linux') {
     args.push("--ffmpeg-location", ffmpegStatic as unknown as string);
   }
 
