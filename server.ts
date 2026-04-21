@@ -44,8 +44,7 @@ mediaWorker.on("failed", (job, err) => {
 
 async function runSpawnWithRetry(
   baseArgs: string[],
-  timeoutMs: number,
-  validateFn?: () => Promise<void>
+  timeoutMs: number
 ): Promise<void> {
   let attempt = 0;
   const videoUrl = baseArgs[baseArgs.length - 1];
@@ -57,7 +56,10 @@ async function runSpawnWithRetry(
     const args = [...baseArgs];
     if (proxyUrl) {
       args.push("--proxy", proxyUrl);
-      // Let yt-dlp handle passing the proxy to its internal downloaders
+      // We must explicitly tell ffmpeg to use the proxy, otherwise when yt-dlp 
+      // invokes ffmpeg to download a specific section (--download-sections), 
+      // ffmpeg will try to connect directly and fail/timeout.
+      args.push("--downloader-args", `ffmpeg:-http_proxy ${proxyUrl}`);
     }
 
     if (attempt > 0) {
@@ -90,19 +92,10 @@ async function runSpawnWithRetry(
           reject(err);
         });
 
-        child.on("close", async (code) => {
+        child.on("close", (code) => {
           clearTimeout(timeoutId);
           if (code === 0) {
-            if (validateFn) {
-              try {
-                await validateFn();
-                resolve();
-              } catch (validationErr) {
-                reject(validationErr);
-              }
-            } else {
-              resolve();
-            }
+            resolve();
           } else {
             reject(new Error(`Process exited with code ${code}: ${stderrData}`));
           }
@@ -517,23 +510,14 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
 
   try {
     console.log("Running yt-dlp to trim video:", ytDlpPath, args);
-    await runSpawnWithRetry(args, 1000 * 60 * 10, async () => {
-      const files = await fs.readdir(tempDir);
-      const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
-      if (!clipFile) {
-        throw new Error("yt-dlp did not create a clip file");
-      }
-
-      const finalPath = path.join(tempDir, clipFile);
-      const stats = await fs.stat(finalPath);
-      if (stats.size < 1024) {
-        // If file is extremely small, it's likely a proxy block or ffmpeg failure
-        throw new Error(`Downloaded clip is too small or empty (${stats.size} bytes). Possible proxy/ffmpeg block.`);
-      }
-    });
+    await runSpawnWithRetry(args, 1000 * 60 * 10); // 10 minute timeout
 
     const files = await fs.readdir(tempDir);
     const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
+    if (!clipFile) {
+      throw new Error("yt-dlp did not create a clip file");
+    }
+
     const finalPath = path.join(tempDir, clipFile);
 
     return {
@@ -587,22 +571,13 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   args.push(url);
 
   try {
-    await runSpawnWithRetry(args, 1000 * 60 * 30, async () => {
-      const files = await fs.readdir(tempDir);
-      const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
-      if (!mediaFile) {
-        throw new Error("yt-dlp did not create a media file");
-      }
-      
-      const finalPath = path.join(tempDir, mediaFile);
-      const stats = await fs.stat(finalPath);
-      if (stats.size < 1024) {
-        throw new Error(`Downloaded media is too small or empty (${stats.size} bytes). Possible proxy/ffmpeg block.`);
-      }
-    });
+    await runSpawnWithRetry(args, 1000 * 60 * 30); // 30 minute timeout
 
     const files = await fs.readdir(tempDir);
     const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
+    if (!mediaFile) {
+      throw new Error("yt-dlp did not create a media file");
+    }
     
     return {
       filePath: path.join(tempDir, mediaFile),
