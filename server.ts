@@ -698,6 +698,19 @@ async function startServer() {
 
   // Basic Anti-Abuse Rate Limiter (Step 15) using Redis
   app.use("/api/", async (req, res, next) => {
+    const pathName = req.path || "";
+    const isHighFrequencyEndpoint =
+      pathName.startsWith("/job-status/") ||
+      pathName.startsWith("/download-file/") ||
+      pathName === "/stream" ||
+      pathName === "/stream.mp4";
+
+    // These endpoints generate many legitimate requests (polling + range streaming).
+    // Keep anti-abuse on expensive job creation routes, but do not throttle these.
+    if (isHighFrequencyEndpoint) {
+      return next();
+    }
+
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown') as string;
     const clientIp = ip.split(',')[0].trim();
     
