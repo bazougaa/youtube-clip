@@ -10,3 +10,10 @@ bin/
 node-v*
 .vercel/
 cookies.txt
+*-player-script.js
+check_*.py
+fetch_logs.py
+deploy_vps_manual.py
+read_*.py
+run_*.py
+test_*.py
