@@ -6,6 +6,7 @@ import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
 import path from "path";
+import { Readable } from "stream";
 import { promisify } from "util";
 import ffmpegStatic from "ffmpeg-static";
 import { Queue, Worker } from "bullmq";
@@ -947,7 +948,46 @@ async function startServer() {
 
     try {
       const streamUrl = await getPlayableVideoUrl(normalizedUrl);
-      res.redirect(302, streamUrl);
+      const upstreamHeaders: Record<string, string> = {};
+      const rangeHeader = req.header("range");
+      if (rangeHeader) {
+        upstreamHeaders.Range = rangeHeader;
+      }
+
+      const upstream = await fetch(streamUrl, {
+        method: "GET",
+        headers: upstreamHeaders,
+        redirect: "follow",
+      });
+
+      if (!upstream.ok && upstream.status !== 206) {
+        throw new Error(`Upstream stream request failed with status ${upstream.status}`);
+      }
+
+      res.status(upstream.status);
+      const passthroughHeaders = [
+        "content-type",
+        "content-length",
+        "content-range",
+        "accept-ranges",
+        "cache-control",
+        "etag",
+        "last-modified",
+      ];
+
+      for (const headerName of passthroughHeaders) {
+        const value = upstream.headers.get(headerName);
+        if (value) {
+          res.setHeader(headerName, value);
+        }
+      }
+      res.setHeader("content-disposition", "inline");
+
+      if (!upstream.body) {
+        throw new Error("Upstream response had no body");
+      }
+
+      Readable.fromWeb(upstream.body as any).pipe(res);
     } catch (error) {
       console.error('Error streaming video:', error);
       if (!res.headersSent) {
