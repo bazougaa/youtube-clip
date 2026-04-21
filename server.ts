@@ -42,6 +42,8 @@ mediaWorker.on("failed", (job, err) => {
   console.error(`[Worker] Job ${job?.id} failed:`, err);
 });
 
+import { LocalProxy } from "./src/utils/local-proxy.js";
+
 async function runSpawnWithRetry(
   baseArgs: string[],
   timeoutMs: number
@@ -53,13 +55,23 @@ async function runSpawnWithRetry(
     const useProxy = attempt > 0 && proxyManager.hasProxy();
     const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
     
+    let localProxy: LocalProxy | null = null;
+    let localProxyPort = 0;
+
     const args = [...baseArgs];
     if (proxyUrl) {
-      args.push("--proxy", proxyUrl);
-      // We must explicitly tell ffmpeg to use the proxy, otherwise when yt-dlp 
-      // invokes ffmpeg to download a specific section (--download-sections), 
-      // ffmpeg will try to connect directly and fail/timeout.
-      args.push("--downloader-args", `ffmpeg:-http_proxy ${proxyUrl}`);
+      try {
+        const u = new URL(proxyUrl);
+        localProxy = new LocalProxy(u.hostname, parseInt(u.port || '1080'), decodeURIComponent(u.username), decodeURIComponent(u.password));
+        localProxyPort = await localProxy.start();
+
+        args.push("--proxy", `socks5://${u.username}:${u.password}@${u.hostname}:${u.port}`);
+        // We must explicitly tell ffmpeg to use the local HTTP proxy, because ffmpeg does not support SOCKS5.
+        // The local proxy will forward the HTTP request to the SOCKS5 proxy-jet server.
+        args.push("--downloader-args", `ffmpeg:-http_proxy http://127.0.0.1:${localProxyPort}`);
+      } catch (err) {
+        console.error("Failed to start local proxy", err);
+      }
     }
 
     if (attempt > 0) {
@@ -94,6 +106,7 @@ async function runSpawnWithRetry(
 
         child.on("close", (code) => {
           clearTimeout(timeoutId);
+          if (localProxy) localProxy.stop().catch(console.error);
           if (code === 0) {
             resolve();
           } else {
@@ -104,6 +117,7 @@ async function runSpawnWithRetry(
       healthTracker.logSuccess(attempt, videoUrl);
       return; // Success
     } catch (error: any) {
+      if (localProxy) localProxy.stop().catch(console.error);
       console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
       
       attempt++;
