@@ -10,7 +10,7 @@ import { promisify } from "util";
 import ffmpegStatic from "ffmpeg-static";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
-import { LocalProxy } from "./src/utils/local-proxy";
+import { LocalProxy } from "./src/utils/local-proxy.js";
 
 const execFileAsync = promisify(execFile);
 
