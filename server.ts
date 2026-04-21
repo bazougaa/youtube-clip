@@ -524,6 +524,17 @@ function safeFileName(value: string) {
     .slice(0, 120) || "youtube_clip";
 }
 
+function createDownloadFileName(title: string, extension: string) {
+  const asciiTitle = safeFileName(
+    title
+      .normalize("NFKD")
+      .replace(/[^\x20-\x7E]/g, "")
+  );
+
+  const safeExtension = extension.replace(/[^a-z0-9]/gi, "").toLowerCase() || "bin";
+  return `${asciiTitle}.${safeExtension}`;
+}
+
 async function createTrimmedClip(url: string, startTime: number, endTime: number) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "youtube-clip-"));
   const outputTemplate = path.join(tempDir, "clip.%(ext)s");
@@ -539,9 +550,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
     "--download-sections",
     `*${formatSectionTime(startTime)}-${formatSectionTime(endTime)}`,
     "-f",
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-    "--merge-output-format",
-    "mp4",
+    "best[ext=mp4][protocol=https]/best[ext=mp4]/best",
     "-o",
     outputTemplate,
   ];
@@ -585,7 +594,7 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
 
 function getVideoFormatSelector(quality: string) {
   if (quality === "best") {
-    return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+    return "best[ext=mp4][protocol=https]/best[ext=mp4]/best";
   }
 
   const height = Number(quality.replace(/p\d*$/i, ""));
@@ -593,7 +602,7 @@ function getVideoFormatSelector(quality: string) {
     throw new Error(`Invalid quality: ${quality}`);
   }
 
-  return `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best[height<=${height}]`;
+  return `best[height<=${height}][ext=mp4][protocol=https]/best[height<=${height}][ext=mp4]/best[height<=${height}]`;
 }
 
 async function createMediaDownload(url: string, kind: string, quality: string) {
@@ -855,15 +864,17 @@ async function startServer() {
 
       let filename = "download.mp4";
       if (job.name === "trim") {
-        filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
-        res.setHeader('Content-Type', 'video/mp4');
+        filename = createDownloadFileName(
+          `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}`,
+          "mp4"
+        );
       } else if (job.name === "download") {
         const qualityLabel = kind === "audio" ? "audio" : String(quality);
-        filename = `${title}_${qualityLabel}.${result.extension || 'mp4'}`;
-        res.setHeader('Content-Type', kind === "audio" ? 'audio/mpeg' : 'video/mp4');
+        filename = createDownloadFileName(
+          `${title}_${qualityLabel}`,
+          result.extension || "mp4"
+        );
       }
-
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
       res.download(result.filePath, filename, async (downloadError) => {
         if (downloadError) {
