@@ -11,7 +11,6 @@ import { promisify } from "util";
 import ffmpegStatic from "ffmpeg-static";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
-import { LocalProxy } from "./src/utils/local-proxy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,29 +56,9 @@ async function runSpawnWithRetry(
     const useProxy = attempt > 0 && proxyManager.hasProxy();
     const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
 
-    let localProxy: LocalProxy | null = null;
-    let localProxyPort = 0;
-
     const args = [...baseArgs];
     if (proxyUrl) {
       args.push("--proxy", proxyUrl);
-      
-      try {
-        const u = new URL(proxyUrl);
-        if (u.protocol.startsWith('socks5')) {
-          const username = decodeURIComponent(u.username || '');
-          const password = decodeURIComponent(u.password || '');
-          const port = parseInt(u.port || '1080');
-          
-          localProxy = new LocalProxy(u.hostname, port, username, password);
-          localProxyPort = await localProxy.start();
-          args.push("--downloader-args", `ffmpeg:-http_proxy http://127.0.0.1:${localProxyPort}`);
-        } else {
-          args.push("--downloader-args", `ffmpeg:-http_proxy ${proxyUrl}`);
-        }
-      } catch (err) {
-        console.error("[Local Proxy] Failed to start local proxy bridge:", err);
-      }
     }
 
     if (attempt > 0) {
@@ -125,15 +104,9 @@ async function runSpawnWithRetry(
         await verifyResult();
       }
       healthTracker.logSuccess(attempt, videoUrl);
-      if (localProxy) {
-        await localProxy.stop();
-      }
       return; // Success
     } catch (error: any) {
       console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
-      if (localProxy) {
-        await localProxy.stop().catch(() => {});
-      }
       
       attempt++;
       if (attempt > MAX_RETRIES) {
@@ -196,7 +169,7 @@ class ProxyManager {
   private proxyUrl: string | null = null;
 
   constructor() {
-    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
+    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || "http://260421fYsD1-resi-any:9AAzjCS2c54jxjz@proxy-jet.io:1010";
   }
 
   getProxyWithSession(): string | null {
