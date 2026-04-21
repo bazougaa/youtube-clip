@@ -182,9 +182,11 @@ function fallbackVideoDetails() {
 }
 
 // Resolve yt-dlp binary path
-const ytDlpPath = process.platform === "win32" 
-  ? path.join(process.cwd(), "bin", "yt-dlp.exe")
-  : "/usr/local/bin/yt-dlp"; // On Linux/Vercel, we'll assume yt-dlp is available in the PATH
+const ytDlpPath =
+  process.env.YT_DLP_PATH?.trim() ||
+  (process.platform === "win32"
+    ? path.join(process.cwd(), "bin", "yt-dlp.exe")
+    : "yt-dlp");
 
 const cookiesPath = path.join(process.cwd(), "cookies.txt");
 
@@ -379,12 +381,6 @@ async function getPlayableVideoUrl(url: string) {
       const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
       if (!streamUrl) {
         throw new Error("yt-dlp did not return a playable URL");
-      }
-
-      // Double check the stream URL actually works
-      const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
-      if (!verifyResponse.ok) {
-        throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
       }
 
       return streamUrl;
@@ -883,16 +879,20 @@ async function startServer() {
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
       res.download(result.filePath, filename, async (downloadError) => {
-        // Clean up temp directory after successful download
+        if (downloadError) {
+          console.error("Failed to stream downloaded media:", downloadError);
+          if (!res.headersSent) {
+            res.status(500).json({ error: "Failed to download media" });
+          }
+          return;
+        }
+
         try {
           if (result.tempDir) {
             await fs.rm(result.tempDir, { recursive: true, force: true });
           }
         } catch (rmError) {
           console.error("Failed to remove temp dir:", rmError);
-        }
-        if (downloadError && !res.headersSent) {
-          res.status(500).json({ error: "Failed to download media" });
         }
       });
     } catch (error: any) {

@@ -1,15 +1,40 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AlertCircle, FileVideo } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Download,
+  FileVideo,
+  Globe,
+  Loader2,
+  MonitorSmartphone,
+  Music,
+  RotateCcw,
+  Scissors,
+  Search,
+  ShieldCheck,
+  Video,
+  Zap,
+} from 'lucide-react';
 import { motion } from 'motion/react';
 import { SEO } from '../components/SEO';
 
 import { VideoQuality } from '../types/video';
-import { getYouTubeThumbnailUrl, parseTimeInput, formatPreciseTime } from '../utils/youtube';
+import { getYouTubeClipEmbedUrl, getYouTubeThumbnailUrl } from '../utils/youtube';
+import { formatBytes, formatPreciseTime, formatTime, parseTimeInput } from '../utils/formatters';
 import { HeroSection } from '../components/home/HeroSection';
 import { VideoPlayer } from '../components/home/VideoPlayer';
 import { TrimControls } from '../components/home/TrimControls';
 import { DownloadGrid } from '../components/home/DownloadGrid';
 import { SEOSection } from '../components/home/SEOSection';
+
+function ButtonProgress() {
+  return (
+    <span className="relative inline-flex h-5 w-5 items-center justify-center">
+      <span className="absolute inset-0 rounded-full border-2 border-current/25" />
+      <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-current animate-spin" />
+    </span>
+  );
+}
 
 export default function Home() {
   const [inputUrl, setInputUrl] = useState('');
@@ -43,7 +68,7 @@ export default function Home() {
       return;
     }
 
-    const nextEmbedUrl = `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`;
+    const nextEmbedUrl = `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}#t=0,10`;
     setIsPlayerReady(false);
     setThumbnailUrl(getYouTubeThumbnailUrl(videoUrl));
     setEmbedUrl(nextEmbedUrl);
@@ -136,7 +161,10 @@ export default function Home() {
       setPreviewRange({ start: startTime, end: endTime });
       // Enforce the use of the official YouTube iFrame embed for reliable previews
       const embed = getYouTubeClipEmbedUrl(videoUrl, startTime, endTime);
-      setEmbedUrl(embed || `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`);
+      setEmbedUrl(
+        embed ||
+          `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}#t=${Math.max(0, startTime)},${Math.max(startTime, endTime)}`
+      );
       setIsPlayerReady(false);
     }, 500);
 
@@ -252,22 +280,32 @@ export default function Home() {
 
     setPreviewRange({ start: startTime, end: endTime });
     setIsPlayerReady(false);
+    const embed = getYouTubeClipEmbedUrl(videoUrl, startTime, endTime);
     // Force player to re-mount by momentarily setting it to null
     setEmbedUrl(null);
-    setTimeout(() => setEmbedUrl(`/api/stream.mp4?url=${encodeURIComponent(videoUrl)}`), 50);
+    setTimeout(() => {
+      setEmbedUrl(
+        embed ||
+          `/api/stream.mp4?url=${encodeURIComponent(videoUrl)}#t=${Math.max(0, startTime)},${Math.max(startTime, endTime)}`
+      );
+    }, 50);
   };
 
-  const pollJobStatus = async (jobId: string, onComplete: (jobId: string) => void) => {
+  const pollJobStatus = async (
+    jobId: string,
+    token: string,
+    onComplete: (jobId: string, token: string) => void
+  ) => {
     try {
       const interval = setInterval(async () => {
         try {
-          const response = await fetch(`/api/job-status/${jobId}`);
+          const response = await fetch(`/api/job-status/${jobId}?token=${encodeURIComponent(token)}`);
           if (!response.ok) throw new Error("Failed to check job status");
           
           const data = await response.json();
           if (data.state === "completed") {
             clearInterval(interval);
-            onComplete(jobId);
+            onComplete(jobId, token);
           } else if (data.state === "failed") {
             clearInterval(interval);
             setError(`Job failed: ${data.failedReason || "Unknown error"}`);
@@ -311,12 +349,12 @@ export default function Home() {
         throw new Error(errorMessage);
       }
 
-      const { jobId } = await response.json();
-      if (!jobId) throw new Error("Server did not return a Job ID");
+      const { jobId, token } = await response.json();
+      if (!jobId || !token) throw new Error("Server did not return a valid job response");
 
       // Poll for completion
-      pollJobStatus(jobId, (completedJobId) => {
-        window.location.href = `/api/download-file/${completedJobId}`;
+      pollJobStatus(jobId, token, (completedJobId, completedToken) => {
+        window.location.href = `/api/download-file/${completedJobId}?token=${encodeURIComponent(completedToken)}`;
         setIsTrimming(false);
       });
       
@@ -350,12 +388,12 @@ export default function Home() {
         throw new Error(errorMessage);
       }
 
-      const { jobId } = await response.json();
-      if (!jobId) throw new Error("Server did not return a Job ID");
+      const { jobId, token } = await response.json();
+      if (!jobId || !token) throw new Error("Server did not return a valid job response");
 
       // Poll for completion
-      pollJobStatus(jobId, (completedJobId) => {
-        window.location.href = `/api/download-file/${completedJobId}`;
+      pollJobStatus(jobId, token, (completedJobId, completedToken) => {
+        window.location.href = `/api/download-file/${completedJobId}?token=${encodeURIComponent(completedToken)}`;
         setActiveDownload(null);
       });
       
