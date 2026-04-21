@@ -44,7 +44,8 @@ mediaWorker.on("failed", (job, err) => {
 
 async function runSpawnWithRetry(
   baseArgs: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  validateFn?: () => Promise<void>
 ): Promise<void> {
   let attempt = 0;
   const videoUrl = baseArgs[baseArgs.length - 1];
@@ -56,6 +57,7 @@ async function runSpawnWithRetry(
     const args = [...baseArgs];
     if (proxyUrl) {
       args.push("--proxy", proxyUrl);
+      // Let yt-dlp handle passing the proxy to its internal downloaders
     }
 
     if (attempt > 0) {
@@ -88,10 +90,19 @@ async function runSpawnWithRetry(
           reject(err);
         });
 
-        child.on("close", (code) => {
+        child.on("close", async (code) => {
           clearTimeout(timeoutId);
           if (code === 0) {
-            resolve();
+            if (validateFn) {
+              try {
+                await validateFn();
+                resolve();
+              } catch (validationErr) {
+                reject(validationErr);
+              }
+            } else {
+              resolve();
+            }
           } else {
             reject(new Error(`Process exited with code ${code}: ${stderrData}`));
           }
@@ -486,6 +497,8 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
     "--no-progress",
     "--force-ipv4",
     "--force-keyframes-at-cuts",
+    "--force-overwrites",
+    "--no-continue",
     "--download-sections",
     `*${formatSectionTime(startTime)}-${formatSectionTime(endTime)}`,
     "-f",
@@ -504,16 +517,27 @@ async function createTrimmedClip(url: string, startTime: number, endTime: number
 
   try {
     console.log("Running yt-dlp to trim video:", ytDlpPath, args);
-    await runSpawnWithRetry(args, 1000 * 60 * 10); // 10 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 10, async () => {
+      const files = await fs.readdir(tempDir);
+      const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
+      if (!clipFile) {
+        throw new Error("yt-dlp did not create a clip file");
+      }
+
+      const finalPath = path.join(tempDir, clipFile);
+      const stats = await fs.stat(finalPath);
+      if (stats.size < 1024) {
+        // If file is extremely small, it's likely a proxy block or ffmpeg failure
+        throw new Error(`Downloaded clip is too small or empty (${stats.size} bytes). Possible proxy/ffmpeg block.`);
+      }
+    });
 
     const files = await fs.readdir(tempDir);
     const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
-    if (!clipFile) {
-      throw new Error("yt-dlp did not create a clip file");
-    }
+    const finalPath = path.join(tempDir, clipFile);
 
     return {
-      filePath: path.join(tempDir, clipFile),
+      filePath: finalPath,
       tempDir,
     };
   } catch (error) {
@@ -544,6 +568,8 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
     "--no-warnings",
     "--no-progress",
     "--force-ipv4",
+    "--force-overwrites",
+    "--no-continue",
     "-o",
     outputTemplate,
   ];
@@ -561,14 +587,23 @@ async function createMediaDownload(url: string, kind: string, quality: string) {
   args.push(url);
 
   try {
-    await runSpawnWithRetry(args, 1000 * 60 * 30); // 30 minute timeout
+    await runSpawnWithRetry(args, 1000 * 60 * 30, async () => {
+      const files = await fs.readdir(tempDir);
+      const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
+      if (!mediaFile) {
+        throw new Error("yt-dlp did not create a media file");
+      }
+      
+      const finalPath = path.join(tempDir, mediaFile);
+      const stats = await fs.stat(finalPath);
+      if (stats.size < 1024) {
+        throw new Error(`Downloaded media is too small or empty (${stats.size} bytes). Possible proxy/ffmpeg block.`);
+      }
+    });
 
     const files = await fs.readdir(tempDir);
     const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
-    if (!mediaFile) {
-      throw new Error("yt-dlp did not create a media file");
-    }
-
+    
     return {
       filePath: path.join(tempDir, mediaFile),
       tempDir,
