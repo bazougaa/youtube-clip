@@ -1,2 +1,0 @@
-require('dotenv').config();
-const { Client } = require('ssh2'); const conn = new Client(); conn.on('ready', () => { console.log('Connected!'); conn.exec('uptime', (err, stream) => { if (err) throw err; stream.on('close', () => { conn.end(); }).on('data', d => console.log(d.toString())); }); }).on('error', e => console.error(e)).connect({ host: 'process.env.VPS_HOST', port: 22, username: 'root', password: 'process.env.VPS_PASSWORD' });
