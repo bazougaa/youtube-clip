@@ -11,6 +11,7 @@ import { promisify } from "util";
 import ffmpegStatic from "ffmpeg-static";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
+import { normalizeYouTubeInputUrl } from "./src/utils/youtube.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -169,7 +170,7 @@ class ProxyManager {
   private proxyUrl: string | null = null;
 
   constructor() {
-    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || "http://260421fYsD1-resi-any:9AAzjCS2c54jxjz@proxy-jet.io:1010";
+    this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
   }
 
   getProxyWithSession(): string | null {
@@ -198,33 +199,7 @@ class ProxyManager {
 const proxyManager = new ProxyManager();
 
 function normalizeYouTubeUrl(rawUrl: string) {
-  try {
-    const parsed = new URL(rawUrl.trim());
-    const host = parsed.hostname.toLowerCase();
-
-    if (!YOUTUBE_HOSTS.has(host)) {
-      return null;
-    }
-
-    if (host === "youtu.be") {
-      const id = parsed.pathname.split("/").filter(Boolean)[0];
-      return id ? `https://www.youtube.com/watch?v=${id}` : null;
-    }
-
-    if (parsed.pathname.startsWith("/shorts/") || parsed.pathname.startsWith("/embed/")) {
-      const id = parsed.pathname.split("/").filter(Boolean)[1];
-      return id ? `https://www.youtube.com/watch?v=${id}` : null;
-    }
-
-    const videoId = parsed.searchParams.get("v");
-    if (!videoId) {
-      return null;
-    }
-
-    return `https://www.youtube.com/watch?v=${videoId}`;
-  } catch {
-    return null;
-  }
+  return normalizeYouTubeInputUrl(rawUrl);
 }
 
 function createAccessToken() {

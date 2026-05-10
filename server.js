@@ -1,45 +1,104 @@
+import "dotenv/config";
 import express from "express";
 import { execFile, spawn } from "child_process";
+import { randomBytes } from "crypto";
 import fs from "fs/promises";
 import { existsSync } from "fs";
 import os from "os";
 import path from "path";
 import { promisify } from "util";
-import ytdl from "@distube/ytdl-core";
 import ffmpegStatic from "ffmpeg-static";
+import { Queue, Worker } from "bullmq";
+import { Redis } from "ioredis";
 const execFileAsync = promisify(execFile);
-function runSpawn(command, args, timeoutMs) {
-    return new Promise((resolve, reject) => {
-        let stderrData = "";
-        const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
-        if (child.stderr) {
-            child.stderr.on("data", (data) => {
-                stderrData += data.toString();
-                // keep stderr bounded to avoid memory issues
-                if (stderrData.length > 50000) {
-                    stderrData = stderrData.slice(-50000);
-                }
-            });
+// Redis Connection for BullMQ & Caching
+const redisConnection = new Redis({
+    host: process.env.REDIS_HOST || "127.0.0.1",
+    port: Number(process.env.REDIS_PORT) || 6379,
+    maxRetriesPerRequest: null,
+});
+// Setup Queue to handle concurrent media processing requests
+const mediaQueue = new Queue("media-processing", { connection: redisConnection });
+// Setup Worker that processes the jobs
+const mediaWorker = new Worker("media-processing", async (job) => {
+    if (job.name === "trim") {
+        const { url, startTime, endTime } = job.data;
+        console.log(`[Worker] Processing trim job ${job.id} for ${url}`);
+        return await createTrimmedClip(url, startTime, endTime);
+    }
+    else if (job.name === "download") {
+        const { url, kind, quality } = job.data;
+        console.log(`[Worker] Processing download job ${job.id} for ${url}`);
+        return await createMediaDownload(url, kind, quality);
+    }
+}, {
+    connection: redisConnection,
+    concurrency: 4, // Upgraded to 4 concurrent jobs to utilize the 6 CPU cores optimally without maxing out the server
+});
+mediaWorker.on("failed", (job, err) => {
+    console.error(`[Worker] Job ${job?.id} failed:`, err);
+});
+async function runSpawnWithRetry(baseArgs, timeoutMs) {
+    let attempt = 0;
+    const videoUrl = baseArgs[baseArgs.length - 1];
+    while (attempt <= MAX_RETRIES) {
+        const useProxy = attempt > 0 && proxyManager.hasProxy();
+        const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
+        const args = [...baseArgs];
+        if (proxyUrl) {
+            args.push("--proxy", proxyUrl);
+            args.push("--downloader-args", `ffmpeg:-http_proxy ${proxyUrl}`);
         }
-        const timeoutId = setTimeout(() => {
-            child.kill("SIGKILL");
-            reject(new Error("Process timed out"));
-        }, timeoutMs);
-        child.on("error", (err) => {
-            clearTimeout(timeoutId);
-            reject(err);
-        });
-        child.on("close", (code) => {
-            clearTimeout(timeoutId);
-            if (code === 0) {
-                resolve();
+        if (attempt > 0) {
+            const humanDelay = 1000 + Math.random() * 2000;
+            await new Promise(r => setTimeout(r, humanDelay));
+        }
+        try {
+            console.log(`[yt-dlp Spawn] Attempt ${attempt} (Proxy: ${useProxy ? 'Yes (Session rotated)' : 'No'})`);
+            await new Promise((resolve, reject) => {
+                let stderrData = "";
+                const child = spawn(ytDlpPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+                if (child.stderr) {
+                    child.stderr.on("data", (data) => {
+                        stderrData += data.toString();
+                        if (stderrData.length > 50000) {
+                            stderrData = stderrData.slice(-50000);
+                        }
+                    });
+                }
+                const timeoutId = setTimeout(() => {
+                    child.kill("SIGKILL");
+                    reject(new Error("Process timed out"));
+                }, timeoutMs);
+                child.on("error", (err) => {
+                    clearTimeout(timeoutId);
+                    reject(err);
+                });
+                child.on("close", (code) => {
+                    clearTimeout(timeoutId);
+                    if (code === 0) {
+                        resolve();
+                    }
+                    else {
+                        reject(new Error(`Process exited with code ${code}: ${stderrData}`));
+                    }
+                });
+            });
+            healthTracker.logSuccess(attempt, videoUrl);
+            return; // Success
+        }
+        catch (error) {
+            console.warn(`[yt-dlp Spawn] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
+            attempt++;
+            if (attempt > MAX_RETRIES) {
+                healthTracker.logFailure("Exhausted all retries", videoUrl);
+                throw error;
             }
-            else {
-                console.error(`yt-dlp exited with code ${code}\nStderr: ${stderrData}`);
-                reject(new Error(`Process exited with code ${code}: ${stderrData}`));
-            }
-        });
-    });
+            const backoff = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500;
+            await new Promise(r => setTimeout(r, backoff));
+        }
+    }
+    throw new Error("yt-dlp spawn failed after all retries");
 }
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -47,10 +106,14 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
 });
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const FALLBACK_DURATION_SECONDS = 600;
-const METADATA_TIMEOUT_MS = 12000;
+const YOUTUBE_HOSTS = new Set([
+    "youtu.be",
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+]);
 function fallbackVideoDetails() {
     return {
         title: "YouTube Video",
@@ -58,130 +121,215 @@ function fallbackVideoDetails() {
         formats: [],
     };
 }
-function withTimeout(promise, timeoutMs, message) {
-    return new Promise((resolve, reject) => {
-        const timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-        promise
-            .then((value) => {
-            clearTimeout(timeoutId);
-            resolve(value);
-        })
-            .catch((error) => {
-            clearTimeout(timeoutId);
-            reject(error);
-        });
-    });
-}
 // Resolve yt-dlp binary path
-const isWindows = os.platform() === 'win32';
-const ytDlpFilename = isWindows ? 'yt-dlp.exe' : 'yt-dlp';
-const ytDlpPath = process.env.NODE_ENV === "production" && process.env.VERCEL
-    ? path.join(process.cwd(), "bin", "yt-dlp")
-    : path.join(process.cwd(), "bin", ytDlpFilename);
-if (!existsSync(ytDlpPath)) {
+const ytDlpPath = process.platform === "win32"
+    ? path.join(process.cwd(), "bin", "yt-dlp.exe")
+    : "/usr/local/bin/yt-dlp"; // On Linux/Vercel, we'll assume yt-dlp is available in the PATH
+const cookiesPath = path.join(process.cwd(), "cookies.txt");
+// --- PROXY MANAGER & RETRY LOGIC (Step 2 & 5) ---
+class ProxyManager {
+    proxyUrl = null;
+    constructor() {
+        this.proxyUrl = process.env.PROXY_URL || process.env.PROXY_LIST || null;
+    }
+    getProxyWithSession() {
+        if (!this.proxyUrl)
+            return null;
+        // Generate a random session ID for each request to force rotation
+        const sessionId = Math.random().toString(36).substring(2, 10);
+        // If the proxy URL contains a {session} placeholder, replace it
+        if (this.proxyUrl.includes("{session}")) {
+            return this.proxyUrl.replace(/{session}/g, sessionId);
+        }
+        // If the provider rotates via query parameter like ?session=xyz
+        if (this.proxyUrl.includes("?session=")) {
+            return this.proxyUrl.replace(/\?session=[^&]*/, `?session=${sessionId}`);
+        }
+        return this.proxyUrl;
+    }
+    hasProxy() {
+        return !!this.proxyUrl;
+    }
+}
+const proxyManager = new ProxyManager();
+function normalizeYouTubeUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl.trim());
+        const host = parsed.hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(host)) {
+            return null;
+        }
+        if (host === "youtu.be") {
+            const id = parsed.pathname.split("/").filter(Boolean)[0];
+            return id ? `https://www.youtube.com/watch?v=${id}` : null;
+        }
+        if (parsed.pathname.startsWith("/shorts/") || parsed.pathname.startsWith("/embed/")) {
+            const id = parsed.pathname.split("/").filter(Boolean)[1];
+            return id ? `https://www.youtube.com/watch?v=${id}` : null;
+        }
+        const videoId = parsed.searchParams.get("v");
+        if (!videoId) {
+            return null;
+        }
+        return `https://www.youtube.com/watch?v=${videoId}`;
+    }
+    catch {
+        return null;
+    }
+}
+function createAccessToken() {
+    return randomBytes(24).toString("hex");
+}
+function getRequestToken(value) {
+    return typeof value === "string" ? value : "";
+}
+// --- HEALTH TRACKER (Step 7) ---
+class HealthTracker {
+    stats = {
+        success: 0,
+        failures: 0,
+        retries: 0,
+    };
+    logSuccess(attempt, videoUrl) {
+        this.stats.success++;
+        if (attempt > 0)
+            this.stats.retries += attempt;
+        console.log(`[Health Tracker] SUCCESS. Total Success: ${this.stats.success}, Failures: ${this.stats.failures}, Total Retries: ${this.stats.retries}`);
+    }
+    logFailure(errorMsg, videoUrl) {
+        this.stats.failures++;
+        console.log(`[Health Tracker] FAILURE on ${videoUrl || 'unknown'}: ${errorMsg}. Total Failures: ${this.stats.failures}`);
+    }
+}
+const healthTracker = new HealthTracker();
+const MAX_RETRIES = 3;
+async function executeYtDlpWithRetry(args, options = {}) {
+    let attempt = 0;
+    const videoUrl = args[args.length - 1];
+    while (attempt <= MAX_RETRIES) {
+        // Attempt 0: No proxy. Attempt 1+: Use proxy with fresh session.
+        const useProxy = attempt > 0 && proxyManager.hasProxy();
+        const proxyUrl = useProxy ? proxyManager.getProxyWithSession() : null;
+        const currentArgs = [...args];
+        if (proxyUrl) {
+            currentArgs.push("--proxy", proxyUrl);
+        }
+        // Add 1-3s random delay before request to mimic human behavior (Step 6)
+        if (attempt > 0) {
+            const humanDelay = 1000 + Math.random() * 2000;
+            await new Promise(r => setTimeout(r, humanDelay));
+        }
+        try {
+            console.log(`[yt-dlp] Attempt ${attempt} (Proxy: ${useProxy ? 'Yes (Session rotated)' : 'No'})`);
+            const result = await execFileAsync(ytDlpPath, currentArgs, {
+                maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
+                timeout: options.timeout || 1000 * 45,
+            });
+            healthTracker.logSuccess(attempt, videoUrl);
+            return result;
+        }
+        catch (error) {
+            console.warn(`[yt-dlp] Attempt ${attempt} failed. Proxy: ${proxyUrl ? 'Yes' : 'No'}. Error: ${error.message}`);
+            attempt++;
+            if (attempt > MAX_RETRIES) {
+                healthTracker.logFailure("Exhausted all retries", videoUrl);
+                throw error;
+            }
+            // Backoff delay before the next attempt
+            const backoff = Math.pow(2, attempt - 1) * 1000 + Math.random() * 500;
+            await new Promise(r => setTimeout(r, backoff));
+        }
+    }
+    throw new Error("yt-dlp failed after all retries");
+}
+function getBaseYtDlpArgs() {
+    const args = [];
+    if (existsSync(cookiesPath)) {
+        args.push("--cookies", cookiesPath);
+    }
+    // Headers + Cookies simulation (Step 4)
+    // yt-dlp automatically extracts cookies from browsers or uses the --cookies file.
+    // We can add realistic headers to avoid blocks.
+    args.push("--add-header", "Accept-Language:en-US,en;q=0.9", "--add-header", "Sec-Fetch-Mode:navigate", "--add-header", "Referer:https://www.youtube.com/", "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    return args;
+}
+if (process.platform === "win32" && !existsSync(ytDlpPath)) {
     console.warn(`WARNING: yt-dlp binary not found at ${ytDlpPath}`);
 }
+const streamUrlPromises = new Map();
 async function getPlayableVideoUrl(url) {
+    // Request Deduplication (Step 10)
+    if (streamUrlPromises.has(url)) {
+        console.log(`[Deduplication] Joining existing stream URL request for ${url}`);
+        return streamUrlPromises.get(url);
+    }
+    const promise = (async () => {
+        // Use yt-dlp as the primary and only reliable extraction engine
+        try {
+            const { stdout } = await executeYtDlpWithRetry([
+                ...getBaseYtDlpArgs(),
+                "--no-playlist",
+                "--no-warnings",
+                "--force-ipv4",
+                "-f",
+                "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
+                "--get-url",
+                url,
+            ]);
+            const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+            if (!streamUrl) {
+                throw new Error("yt-dlp did not return a playable URL");
+            }
+            // Double check the stream URL actually works
+            const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
+            if (!verifyResponse.ok) {
+                throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
+            }
+            return streamUrl;
+        }
+        catch (ytDlpError) {
+            console.error("yt-dlp failed to get playable video URL:", ytDlpError);
+        }
+        // If node library fails, return the embedded youtube URL directly for the player
+        console.warn("All direct stream methods failed, falling back to standard youtube watch url");
+        return url;
+    })();
+    streamUrlPromises.set(url, promise);
     try {
-        // Attempt to use ytdl-core first for Vercel compatibility
-        const info = await ytdl.getInfo(url);
-        // Check if decipher failed based on number of formats
-        if (info.formats && info.formats.length >= 5) {
-            // Sometimes 'audioandvideo' filter fails if a combined stream isn't available at highest quality.
-            // So we use a custom filter to ensure we get a combined mp4 stream if possible.
-            const format = ytdl.chooseFormat(info.formats, {
-                filter: (format) => format.container === 'mp4' && format.hasVideo && format.hasAudio
-            }) || ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-            if (format && format.url) {
-                // Verify the URL actually works (ytdl-core sometimes returns 403 URLs)
-                const response = await fetch(format.url, { method: 'HEAD' });
-                if (response.ok) {
-                    return format.url;
-                }
-                else {
-                    console.warn(`ytdl-core URL returned ${response.status}, falling back to yt-dlp...`);
-                }
+        return await promise;
+    }
+    finally {
+        streamUrlPromises.delete(url);
+    }
+}
+const metadataPromises = new Map();
+async function getVideoDetails(url) {
+    // Request Deduplication (Step 10)
+    if (metadataPromises.has(url)) {
+        console.log(`[Deduplication] Joining existing metadata request for ${url}`);
+        return metadataPromises.get(url);
+    }
+    const promise = (async () => {
+        // Check Redis Cache First
+        const cacheKey = `metadata:${url}`;
+        try {
+            const cached = await redisConnection.get(cacheKey);
+            if (cached) {
+                console.log(`[Cache Hit] Video metadata for ${url}`);
+                return JSON.parse(cached);
             }
         }
-        else {
-            console.warn("ytdl-core returned too few formats, skipping to yt-dlp stream URL lookup.");
+        catch (redisError) {
+            console.warn("Redis cache read failed:", redisError);
         }
-    }
-    catch (ytdlError) {
-        console.warn("ytdl-core stream URL lookup failed, falling back to yt-dlp:", ytdlError);
-    }
-    // Fallback to yt-dlp if available
-    try {
-        const { stdout } = await execFileAsync(ytDlpPath, [
-            "--no-playlist",
-            "--no-warnings",
-            "--force-ipv4",
-            "-f",
-            "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
-            "--get-url",
-            url,
-        ]);
-        const streamUrl = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-        if (!streamUrl) {
-            throw new Error("yt-dlp did not return a playable URL");
-        }
-        // Double check the stream URL actually works, because yt-dlp can sometimes return 403s on Windows
-        const verifyResponse = await fetch(streamUrl, { method: 'HEAD' });
-        if (!verifyResponse.ok) {
-            throw new Error(`yt-dlp URL returned ${verifyResponse.status}`);
-        }
-        return streamUrl;
-    }
-    catch (ytDlpError) {
-        console.error("yt-dlp failed:", ytDlpError);
-    }
-    // If both node libraries fail, return the embedded youtube URL directly for the player
-    // This ensures the frontend doesn't crash entirely and can at least fall back to youtube embed
-    console.warn("All direct stream methods failed, falling back to standard youtube watch url");
-    return url;
-}
-async function getVideoDetails(url) {
-    try {
-        // Attempt to use ytdl-core first as it's purely Node.js and works cleanly on Vercel
-        // Add a hard timeout so serverless requests fail fast into fallback metadata.
-        const info = await withTimeout(ytdl.getInfo(url, {
-            requestOptions: {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            },
-        }), METADATA_TIMEOUT_MS, "ytdl-core metadata lookup timed out");
-        const formatList = Array.isArray(info.formats) ? info.formats : [];
-        const formats = formatList.map((f) => ({
-            format_id: String(f.itag),
-            ext: f.container,
-            height: f.height,
-            width: f.width,
-            fps: f.fps,
-            vcodec: f.hasVideo ? f.videoCodec : "none",
-            acodec: f.hasAudio ? f.audioCodec : "none",
-            filesize: Number(f.contentLength) || undefined,
-        }));
-        // If ytdl-core decipher failed, it often returns very few or 0 formats.
-        // Force yt-dlp fallback if we don't get a good list of qualities.
-        if (formats.length < 5) {
-            throw new Error("ytdl-core returned too few formats, likely due to decipher failure.");
-        }
-        return {
-            title: info.videoDetails.title,
-            duration: Number(info.videoDetails.lengthSeconds),
-            formats,
-        };
-    }
-    catch (ytdlError) {
-        console.warn("ytdl-core metadata lookup failed, attempting yt-dlp fallback:", ytdlError);
-        if (!existsSync(ytDlpPath)) {
+        console.log(`[Cache Miss] Fetching video metadata for ${url} via yt-dlp...`);
+        if (process.platform === "win32" && !existsSync(ytDlpPath)) {
             console.warn("yt-dlp binary is unavailable, returning safe fallback metadata.");
             return fallbackVideoDetails();
         }
         try {
-            const { stdout } = await execFileAsync(ytDlpPath, [
+            const { stdout } = await executeYtDlpWithRetry([
+                ...getBaseYtDlpArgs(),
                 "--no-playlist",
                 "--no-warnings",
                 "--force-ipv4",
@@ -194,16 +342,31 @@ async function getVideoDetails(url) {
                 timeout: 1000 * 45,
             });
             const parsed = JSON.parse(stdout);
-            return {
+            const result = {
                 title: parsed.title || "YouTube Video",
                 duration: Number(parsed.duration) || FALLBACK_DURATION_SECONDS,
                 formats: Array.isArray(parsed.formats) ? parsed.formats : [],
             };
+            // Save to Cache (expire in 24 hours)
+            try {
+                await redisConnection.set(cacheKey, JSON.stringify(result), "EX", 60 * 60 * 24);
+            }
+            catch (redisError) {
+                console.warn("Redis cache write failed:", redisError);
+            }
+            return result;
         }
-        catch (fallbackError) {
-            console.error("All metadata fallbacks failed, returning safe defaults:", fallbackError);
+        catch (error) {
+            console.error("All metadata extractions failed, returning safe defaults:", error);
             return fallbackVideoDetails();
         }
+    })();
+    metadataPromises.set(url, promise);
+    try {
+        return await promise;
+    }
+    finally {
+        metadataPromises.delete(url);
     }
 }
 function getAvailableQualities(formats = []) {
@@ -257,11 +420,14 @@ async function createTrimmedClip(url, startTime, endTime) {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "youtube-clip-"));
     const outputTemplate = path.join(tempDir, "clip.%(ext)s");
     const args = [
+        ...getBaseYtDlpArgs(),
         "--no-playlist",
         "--no-warnings",
         "--no-progress",
         "--force-ipv4",
         "--force-keyframes-at-cuts",
+        "--force-overwrites",
+        "--no-continue",
         "--download-sections",
         `*${formatSectionTime(startTime)}-${formatSectionTime(endTime)}`,
         "-f",
@@ -277,14 +443,15 @@ async function createTrimmedClip(url, startTime, endTime) {
     args.push(url);
     try {
         console.log("Running yt-dlp to trim video:", ytDlpPath, args);
-        await runSpawn(ytDlpPath, args, 1000 * 60 * 10); // 10 minute timeout
+        await runSpawnWithRetry(args, 1000 * 60 * 10); // 10 minute timeout
         const files = await fs.readdir(tempDir);
         const clipFile = files.find((file) => file.toLowerCase().endsWith(".mp4")) || files[0];
         if (!clipFile) {
             throw new Error("yt-dlp did not create a clip file");
         }
+        const finalPath = path.join(tempDir, clipFile);
         return {
-            filePath: path.join(tempDir, clipFile),
+            filePath: finalPath,
             tempDir,
         };
     }
@@ -307,10 +474,13 @@ async function createMediaDownload(url, kind, quality) {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "youtube-download-"));
     const outputTemplate = path.join(tempDir, "download.%(ext)s");
     const args = [
+        ...getBaseYtDlpArgs(),
         "--no-playlist",
         "--no-warnings",
         "--no-progress",
         "--force-ipv4",
+        "--force-overwrites",
+        "--no-continue",
         "-o",
         outputTemplate,
     ];
@@ -325,7 +495,7 @@ async function createMediaDownload(url, kind, quality) {
     }
     args.push(url);
     try {
-        await runSpawn(ytDlpPath, args, 1000 * 60 * 30); // 30 minute timeout
+        await runSpawnWithRetry(args, 1000 * 60 * 30); // 30 minute timeout
         const files = await fs.readdir(tempDir);
         const mediaFile = files.find((file) => /\.(mp4|mp3|m4a|webm)$/i.test(file)) || files[0];
         if (!mediaFile) {
@@ -355,11 +525,37 @@ async function startServer() {
         console.log(`[${req.method}] ${req.url}`);
         next();
     });
+    // Basic Anti-Abuse Rate Limiter (Step 15) using Redis
+    app.use("/api/", async (req, res, next) => {
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown');
+        const clientIp = ip.split(',')[0].trim();
+        const key = `rate-limit:${clientIp}`;
+        try {
+            const current = await redisConnection.incr(key);
+            if (current === 1) {
+                await redisConnection.expire(key, 60); // 1 minute window
+            }
+            // Limit to 20 API requests per minute per IP
+            if (current > 20) {
+                console.warn(`[Rate Limit] Blocked request from ${clientIp}`);
+                return res.status(429).json({ error: "Too many requests. Please try again later." });
+            }
+            next();
+        }
+        catch (error) {
+            console.warn("Rate limiter redis error, bypassing:", error);
+            next();
+        }
+    });
     // API Route for trimming
     app.get("/api/trim", async (req, res) => {
         const { url, start, end } = req.query;
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: "URL is required" });
+        }
+        const normalizedUrl = normalizeYouTubeUrl(url);
+        if (!normalizedUrl) {
+            return res.status(400).json({ error: "Please provide a valid YouTube URL." });
         }
         const startTime = parseFloat(start) || 0;
         const endTime = parseFloat(end) || 10;
@@ -368,31 +564,10 @@ async function startServer() {
             return res.status(400).json({ error: "Invalid duration" });
         }
         try {
-            console.log(`Trimming video: ${url} from ${startTime} to ${endTime}`);
-            const clip = await createTrimmedClip(url, startTime, endTime);
-            if (!clip || !clip.filePath || !existsSync(clip.filePath)) {
-                throw new Error("Clip file was not generated properly.");
-            }
-            let title = "youtube_clip";
-            try {
-                const metadata = await getVideoMetadata(url);
-                title = safeFileName(metadata.title);
-            }
-            catch (metadataError) {
-                console.warn("Metadata lookup failed, falling back to default clip name:", metadataError);
-            }
-            const filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
-            res.download(clip.filePath, filename, async (downloadError) => {
-                try {
-                    await fs.rm(clip.tempDir, { recursive: true, force: true });
-                }
-                catch (rmError) {
-                    console.error("Failed to remove temp dir:", rmError);
-                }
-                if (downloadError && !res.headersSent) {
-                    res.status(500).json({ error: "Failed to download clip" });
-                }
-            });
+            const accessToken = createAccessToken();
+            console.log(`Queueing trim job: ${normalizedUrl} from ${startTime} to ${endTime}`);
+            const job = await mediaQueue.add("trim", { url: normalizedUrl, startTime, endTime, accessToken });
+            res.json({ jobId: job.id, token: accessToken, message: "Trim job started" });
         }
         catch (error) {
             console.error('Error processing video:', error);
@@ -404,12 +579,91 @@ async function startServer() {
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: "URL is required" });
         }
+        const normalizedUrl = normalizeYouTubeUrl(url);
+        if (!normalizedUrl) {
+            return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+        }
         if (kind !== "video" && kind !== "audio") {
             return res.status(400).json({ error: "Download kind must be video or audio" });
         }
         try {
-            console.log(`Downloading ${kind}: ${url} quality=${quality}`);
-            const media = await createMediaDownload(url, kind, String(quality));
+            const accessToken = createAccessToken();
+            console.log(`Queueing download job: ${kind} for ${normalizedUrl} quality=${quality}`);
+            const job = await mediaQueue.add("download", {
+                url: normalizedUrl,
+                kind,
+                quality: String(quality),
+                accessToken,
+            });
+            res.json({ jobId: job.id, token: accessToken, message: "Download job started" });
+        }
+        catch (error) {
+            console.error('Error downloading media:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: "Failed to queue download media job." });
+            }
+        }
+    });
+    app.get("/api/job-status/:id", async (req, res) => {
+        const { id } = req.params;
+        const token = getRequestToken(req.query.token);
+        if (!id) {
+            return res.status(400).json({ error: "Job ID is required" });
+        }
+        if (!token) {
+            return res.status(401).json({ error: "Download token is required" });
+        }
+        try {
+            const job = await mediaQueue.getJob(id);
+            if (!job) {
+                return res.status(404).json({ error: "Job not found" });
+            }
+            const jobData = job.data;
+            if (jobData.accessToken !== token) {
+                return res.status(403).json({ error: "Invalid download token" });
+            }
+            const state = await job.getState();
+            const progress = job.progress;
+            const failedReason = job.failedReason;
+            res.json({
+                id: job.id,
+                state,
+                progress,
+                failedReason,
+            });
+        }
+        catch (error) {
+            console.error('Error checking job status:', error);
+            res.status(500).json({ error: "Failed to check job status" });
+        }
+    });
+    app.get("/api/download-file/:id", async (req, res) => {
+        const { id } = req.params;
+        const token = getRequestToken(req.query.token);
+        if (!id) {
+            return res.status(400).json({ error: "Job ID is required" });
+        }
+        if (!token) {
+            return res.status(401).json({ error: "Download token is required" });
+        }
+        try {
+            const job = await mediaQueue.getJob(id);
+            if (!job) {
+                return res.status(404).json({ error: "Job not found" });
+            }
+            const jobData = job.data;
+            if (jobData.accessToken !== token) {
+                return res.status(403).json({ error: "Invalid download token" });
+            }
+            const state = await job.getState();
+            if (state !== "completed") {
+                return res.status(400).json({ error: `Job is not completed yet (current state: ${state})` });
+            }
+            const result = job.returnvalue;
+            if (!result || !result.filePath || !existsSync(result.filePath)) {
+                return res.status(500).json({ error: "File not found or already deleted." });
+            }
+            const { url, startTime, endTime, kind, quality } = jobData;
             let title = "youtube_video";
             try {
                 const metadata = await getVideoMetadata(url);
@@ -418,11 +672,23 @@ async function startServer() {
             catch (metadataError) {
                 console.warn("Metadata lookup failed, falling back to default media name:", metadataError);
             }
-            const qualityLabel = kind === "audio" ? "audio" : String(quality);
-            const filename = `${title}_${qualityLabel}.${media.extension}`;
-            res.download(media.filePath, filename, async (downloadError) => {
+            let filename = "download.mp4";
+            if (job.name === "trim") {
+                filename = `${title}_${formatSectionTime(startTime)}-${formatSectionTime(endTime)}.mp4`;
+                res.setHeader('Content-Type', 'video/mp4');
+            }
+            else if (job.name === "download") {
+                const qualityLabel = kind === "audio" ? "audio" : String(quality);
+                filename = `${title}_${qualityLabel}.${result.extension || 'mp4'}`;
+                res.setHeader('Content-Type', kind === "audio" ? 'audio/mpeg' : 'video/mp4');
+            }
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.download(result.filePath, filename, async (downloadError) => {
+                // Clean up temp directory after successful download
                 try {
-                    await fs.rm(media.tempDir, { recursive: true, force: true });
+                    if (result.tempDir) {
+                        await fs.rm(result.tempDir, { recursive: true, force: true });
+                    }
                 }
                 catch (rmError) {
                     console.error("Failed to remove temp dir:", rmError);
@@ -433,9 +699,9 @@ async function startServer() {
             });
         }
         catch (error) {
-            console.error('Error downloading media:', error);
+            console.error('Error downloading file:', error);
             if (!res.headersSent) {
-                res.status(500).json({ error: "Failed to download media." });
+                res.status(500).json({ error: "Failed to download file." });
             }
         }
     });
@@ -447,8 +713,12 @@ async function startServer() {
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: "URL is required" });
         }
+        const normalizedUrl = normalizeYouTubeUrl(url);
+        if (!normalizedUrl) {
+            return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+        }
         try {
-            const info = await getVideoMetadata(url);
+            const info = await getVideoMetadata(normalizedUrl);
             res.json(info);
         }
         catch (error) {
@@ -468,8 +738,12 @@ async function startServer() {
         if (!url || typeof url !== 'string') {
             return res.status(400).json({ error: "URL is required" });
         }
+        const normalizedUrl = normalizeYouTubeUrl(url);
+        if (!normalizedUrl) {
+            return res.status(400).json({ error: "Please provide a valid YouTube URL." });
+        }
         try {
-            const streamUrl = await getPlayableVideoUrl(url);
+            const streamUrl = await getPlayableVideoUrl(normalizedUrl);
             res.redirect(302, streamUrl);
         }
         catch (error) {
@@ -512,3 +786,43 @@ async function startServer() {
 startServer();
 // Export for Vercel serverless
 export default app;
+// --- ROBUST TEMPORARY FILE CLEANUP (Cron) ---
+// Run every hour to delete orphaned temporary folders (older than 2 hours)
+function startTempFileCleanupCron() {
+    const CLEANUP_INTERVAL_MS = 1000 * 60 * 60; // 1 hour
+    const MAX_AGE_MS = 1000 * 60 * 60 * 2; // 2 hours
+    setInterval(async () => {
+        try {
+            const tmpDir = os.tmpdir();
+            const files = await fs.readdir(tmpDir);
+            const now = Date.now();
+            let cleanedCount = 0;
+            for (const file of files) {
+                if (file.startsWith("youtube-clip-") || file.startsWith("youtube-download-")) {
+                    const fullPath = path.join(tmpDir, file);
+                    try {
+                        const stats = await fs.stat(fullPath);
+                        if (now - stats.mtimeMs > MAX_AGE_MS) {
+                            await fs.rm(fullPath, { recursive: true, force: true });
+                            cleanedCount++;
+                        }
+                    }
+                    catch (statError) {
+                        // Ignore individual file stat/rm errors (e.g. permission issues or file already deleted)
+                    }
+                }
+            }
+            if (cleanedCount > 0) {
+                console.log(`[Cleanup Cron] Successfully removed ${cleanedCount} stale temporary directories.`);
+            }
+        }
+        catch (err) {
+            console.error("[Cleanup Cron] Failed to read temporary directory:", err);
+        }
+    }, CLEANUP_INTERVAL_MS);
+    console.log("[Cleanup Cron] Initialized. Running every 1 hour.");
+}
+// Only start the cron if not in a serverless environment (Vercel kills background tasks)
+if (!process.env.VERCEL) {
+    startTempFileCleanupCron();
+}

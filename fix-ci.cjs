@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { Client } = require('ssh2');
 
 const conn = new Client();
@@ -27,9 +28,9 @@ conn.on('ready', () => {
     });
   });
 }).connect({
-  host: '77.237.238.195',
+  host: 'process.env.VPS_HOST',
   port: 22,
   username: 'root',
-  password: '7548693120.aA',
+  password: 'process.env.VPS_PASSWORD',
   readyTimeout: 20000
 });

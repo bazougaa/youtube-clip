@@ -19,7 +19,7 @@ import { motion } from 'motion/react';
 import { SEO } from '../components/SEO';
 
 import { VideoQuality } from '../types/video';
-import { getYouTubeClipEmbedUrl, getYouTubeThumbnailUrl } from '../utils/youtube';
+import { getYouTubeClipEmbedUrl, getYouTubeThumbnailUrl, normalizeYouTubeInputUrl } from '../utils/youtube';
 import { formatBytes, formatPreciseTime, formatTime, parseTimeInput } from '../utils/formatters';
 import { HeroSection } from '../components/home/HeroSection';
 import { VideoPlayer } from '../components/home/VideoPlayer';
@@ -179,17 +179,13 @@ export default function Home() {
       setError("Please provide a YouTube link.");
       return;
     }
-    
-    // Convert short URLs to standard watch URLs for consistent parsing
-    let normalizedUrl = trimmedUrl;
-    if (normalizedUrl.includes('youtu.be/')) {
-      const id = normalizedUrl.split('youtu.be/')[1]?.split('?')[0];
-      if (id) normalizedUrl = `https://www.youtube.com/watch?v=${id}`;
-    } else if (normalizedUrl.includes('/shorts/')) {
-      const id = normalizedUrl.split('/shorts/')[1]?.split('?')[0];
-      if (id) normalizedUrl = `https://www.youtube.com/watch?v=${id}`;
+
+    const normalizedUrl = normalizeYouTubeInputUrl(trimmedUrl);
+    if (!normalizedUrl) {
+      setError("Please provide a valid YouTube link.");
+      return;
     }
-    
+
     setVideoUrl(normalizedUrl);
     setError(null);
   };

@@ -16,9 +16,9 @@ conn.on('ready', () => {
 }).on('error', (err) => {
   console.error('Connection Error:', err);
 }).connect({
-  host: '77.237.238.195',
+  host: 'process.env.VPS_HOST',
   port: 22,
   username: 'root',
-  password: '7548693120aA',
+  password: 'process.env.VPS_PASSWORD',
   readyTimeout: 10000
 });
